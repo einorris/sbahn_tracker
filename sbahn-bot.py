@@ -3,6 +3,7 @@ import re
 import requests
 import datetime
 import html
+from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -28,10 +29,12 @@ def fetch_messages():
     return resp.json()
 
 def clean_unsupported_html(text):
-    # Удаляем теги <p> и </p>, а также другие неподдерживаемые теги.
-    text = re.sub(r"</?p>", "", text)
-    # Можно добавить ещё удаление других тегов при необходимости
-    return text
+    allowed = ['b', 'i', 'u', 's', 'a', 'code', 'pre']
+    soup = BeautifulSoup(text, "html.parser")
+    for tag in soup.find_all():
+        if tag.name not in allowed:
+            tag.unwrap()
+    return str(soup)
 
 
 def is_active(incident_durations):
