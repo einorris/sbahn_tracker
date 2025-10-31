@@ -1,3 +1,4 @@
+import os
 import requests
 import datetime
 import html
@@ -5,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- Настройки ---
-TOKEN = "ТОКЕН_ОТ_BOTFATHER"
+TOKEN = os.getenv("TELEGRAM_TOKEN")  # безопасно получаем токен из переменных окружения
 URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
 
 
@@ -15,6 +16,7 @@ def fetch_messages():
     response = requests.get(URL, headers=headers)
     response.raise_for_status()
     return response.json()
+
 
 def is_active(incident_durations):
     if not incident_durations:
@@ -26,6 +28,7 @@ def is_active(incident_durations):
         if start and end and start <= now <= end:
             return True
     return False
+
 
 def filter_s2_messages(messages):
     result = []
@@ -53,10 +56,8 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mtype = html.escape(msg.get("type", ""))
             pub = msg.get("publication")
             pub_str = datetime.datetime.utcfromtimestamp(pub / 1000).strftime("%d.%m.%Y %H:%M") if pub else "?"
-            
-            keyboard = [
-                [InlineKeyboardButton("📄 Подробнее", callback_data=f"details_{i}")]
-            ]
+
+            keyboard = [[InlineKeyboardButton("📄 Подробнее", callback_data=f"details_{i}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(
@@ -65,7 +66,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup
             )
 
-        # сохраняем данные в контекст для обратного вызова
+        # сохраняем данные для обратного вызова
         context.user_data["s2_msgs"] = s2_msgs
 
     except Exception as e:
@@ -97,15 +98,13 @@ async def show_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time_str = f"{start} – {end} UTC"
 
     text = f"*{title}*\n\n{desc}\n\n🕓 *Gültig:* {time_str}"
-
     await query.edit_message_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 # --- Запуск приложения ---
-app = ApplicationBuilder().token(TOKEN).build()
-
-app.add_handler(CommandHandler("check", check))
-app.add_handler(CallbackQueryHandler(show_details))
-
-print("🤖 Bot started...")
-app.run_polling()
+if __name__ == "__main__":
+    print("🤖 Bot started...")
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("check", check))
+    app.add_handler(CallbackQueryHandler(show_details))
+    app.run_polling()
