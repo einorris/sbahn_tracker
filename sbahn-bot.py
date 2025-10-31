@@ -61,8 +61,8 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(
-                f"🚆 *{title}*\n_{mtype}_\n🕓 {pub_str} UTC",
-                parse_mode="Markdown",
+                f"🚆 <b>{title}</b><br><i>{mtype}</i><br>🕓 {pub_str} UTC",
+                parse_mode="HTML",
                 reply_markup=reply_markup
             )
 
@@ -98,7 +98,8 @@ async def show_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time_str = f"{start} – {end} UTC"
 
     text = f"*{title}*\n\n{desc}\n\n🕓 *Gültig:* {time_str}"
-    await query.edit_message_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+    await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
 
 
 # --- Запуск приложения ---
