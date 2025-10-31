@@ -1,25 +1,33 @@
 import os
 import requests
 import datetime
-from bs4 import BeautifulSoup
+import html
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+)
 
-# 🔑 Настройки
-TOKEN = os.getenv("TELEGRAM_TOKEN")  # токен из переменных окружения
+# ============================================================
+# 🔧 Настройки
+# ============================================================
+TOKEN = os.getenv("BOT_TOKEN")  # токен Telegram из Railway secrets
 URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
 
-
-# --- Вспомогательные функции ---
+# ============================================================
+# 🧩 Функции
+# ============================================================
 def fetch_messages():
+    """Получает JSON со всеми сообщениями MVG."""
     headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(URL, headers=headers)
     resp.raise_for_status()
     return resp.json()
 
-
 def is_active(incident_durations):
-    """Проверяет, активно ли сообщение в данный момент"""
+    """Проверяет, актуально ли сообщение сейчас."""
     if not incident_durations:
         return False
     now = datetime.datetime.utcnow().timestamp() * 1000
@@ -30,96 +38,79 @@ def is_active(incident_durations):
             return True
     return False
 
-
-def filter_s2_messages(messages):
-    """Фильтрует только активные сообщения по линии S2"""
-    result = []
+def filter_sbahn_messages(messages, line_label="S2"):
+    """Фильтрует активные сообщения по линии S-Bahn (S1–S8)."""
+    seen = {}
     for msg in messages:
         for line in msg.get("lines", []):
-            if line.get("transportType") == "SBAHN" and line.get("label") == "S2":
+            if line.get("transportType") == "SBAHN" and line.get("label") == line_label:
                 if is_active(msg.get("incidentDurations", [])):
-                    result.append(msg)
-    result.sort(key=lambda m: m.get("publication", 0), reverse=True)
-    return result
+                    title = msg.get("title", "").strip()
+                    pub = msg.get("publication", 0)
+                    if title in seen:
+                        if pub > seen[title].get("publication", 0):
+                            seen[title] = msg
+                    else:
+                        seen[title] = msg
+    return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
 
+def format_message(messages, line_label="S2"):
+    """Создает HTML-формат сообщений."""
+    if not messages:
+        return f"✅ <b>Keine aktuellen Meldungen für {line_label}.</b>"
 
-def html_to_plain_text(html_content):
-    """Преобразует HTML в чистый текст"""
-    if not html_content:
-        return ""
-    text = BeautifulSoup(html_content, "html.parser").get_text(separator="\n")
-    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-    return text
+    result = [f"<b>🚆 Aktuelle Betriebsmeldungen {line_label}:</b>\n"]
+    for msg in messages:
+        title = html.escape(msg.get("title", ""))
+        desc = msg.get("description", "")
+        pub = msg.get("publication", 0)
+        pub_str = datetime.datetime.utcfromtimestamp(pub / 1000).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
+        result.append(
+            f"🟢 <b>{title}</b>\n"
+            f"<i>({pub_str} UTC)</i>\n\n"
+            f"{desc}\n\n"
+            "───────────────\n"
+        )
+    return "\n".join(result)
 
-# --- Команда /check ---
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        data = fetch_messages()
-        s2_msgs = filter_s2_messages(data)
+# ============================================================
+# 🤖 Telegram handlers
+# ============================================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает кнопки выбора линии."""
+    keyboard = [
+        [InlineKeyboardButton(f"S{i}", callback_data=f"S{i}") for i in range(1, 5)],
+        [InlineKeyboardButton(f"S{i}", callback_data=f"S{i}") for i in range(5, 9)],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "👋 Wähle eine S-Bahn Linie für aktuelle Meldungen:",
+        reply_markup=reply_markup
+    )
 
-        if not s2_msgs:
-            await update.message.reply_text("✅ Keine aktuellen Störungen auf der S2.")
-            return
-
-        # сохраняем сообщения в контексте
-        context.user_data["s2_msgs"] = s2_msgs
-
-        for i, msg in enumerate(s2_msgs):
-            title = msg.get("title", "Без заголовка")
-            mtype = msg.get("type", "")
-            pub = msg.get("publication")
-            pub_str = datetime.datetime.utcfromtimestamp(pub / 1000).strftime("%d.%m.%Y %H:%M") if pub else "?"
-
-            keyboard = [[InlineKeyboardButton("📄 Подробнее", callback_data=f"details_{i}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            preview_text = f"🚆 {title}\n{mtype}\n🕓 {pub_str} UTC\n(Нажмите «Подробнее» для полного текста.)"
-
-            await update.message.reply_text(preview_text, reply_markup=reply_markup)
-
-    except Exception as e:
-        await update.message.reply_text(f"❗Ошибка при загрузке данных: {e}")
-
-
-# --- Обработчик кнопки "Подробнее" ---
-async def show_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_line_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора линии пользователем."""
     query = update.callback_query
     await query.answer()
 
-    msg_index = int(query.data.split("_")[1])
-    s2_msgs = context.user_data.get("s2_msgs", [])
+    line_label = query.data  # например "S2"
+    try:
+        data = fetch_messages()
+        filtered = filter_sbahn_messages(data, line_label)
+        message = format_message(filtered, line_label)
+        await query.edit_message_text(
+            text=message, parse_mode="HTML", disable_web_page_preview=True
+        )
+    except Exception as e:
+        await query.edit_message_text(f"❌ Fehler: {e}")
 
-    if msg_index >= len(s2_msgs):
-        await query.edit_message_text("Сообщение не найдено.")
-        return
-
-    msg = s2_msgs[msg_index]
-    title = msg.get("title", "Без заголовка")
-    raw_desc = msg.get("description", "")
-    desc_text = html_to_plain_text(raw_desc)
-
-    durations = msg.get("incidentDurations", [])
-    time_str = ""
-    if durations:
-        d = durations[0]
-        start = datetime.datetime.utcfromtimestamp(d.get("from") / 1000).strftime("%d.%m.%Y %H:%M")
-        end = datetime.datetime.utcfromtimestamp(d.get("to") / 1000).strftime("%d.%m.%Y %H:%M")
-        time_str = f"{start} – {end} UTC"
-
-    full_text = f"{title}\n\n{desc_text}\n\n🕓 Gültig: {time_str}"
-
-    MAX_LEN = 3900  # лимит Telegram
-    if len(full_text) > MAX_LEN:
-        full_text = full_text[:MAX_LEN] + "\n\n...[truncated]"
-
-    await query.edit_message_text(full_text, disable_web_page_preview=True)
-
-
-# --- Основной запуск ---
+# ============================================================
+# 🚀 Запуск бота
+# ============================================================
 if __name__ == "__main__":
-    print("🤖 Bot started...")
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("check", check))
-    app.add_handler(CallbackQueryHandler(show_details))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_line_selection))
+    print("✅ Bot is running...")
     app.run_polling()
