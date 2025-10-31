@@ -1,19 +1,24 @@
 import os
+import re
 import requests
 import datetime
 import html
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+)
 
 # ============================================================
 # 🔧 Настройки
 # ============================================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")  # токен Telegram из Railway secrets
-CHAT_ID = os.getenv("CHAT_ID", None)
 URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
 
 # ============================================================
-# 🧩 Вспомогательные функции
+# 🧩 Функции
 # ============================================================
 def fetch_messages():
     """Получает JSON со всеми сообщениями MVG."""
@@ -22,11 +27,18 @@ def fetch_messages():
     resp.raise_for_status()
     return resp.json()
 
+def clean_unsupported_html(text):
+    # Удаляем теги <p> и </p>, а также другие неподдерживаемые теги.
+    text = re.sub(r"</?p>", "", text)
+    # Можно добавить ещё удаление других тегов при необходимости
+    return text
+
+
 def is_active(incident_durations):
     """Проверяет, актуально ли сообщение сейчас."""
     if not incident_durations:
         return False
-    now = datetime.datetime.utcnow().timestamp() * 1000  # миллисекунды
+    now = datetime.datetime.utcnow().timestamp() * 1000
     for d in incident_durations:
         start = d.get("from")
         end = d.get("to")
@@ -34,37 +46,34 @@ def is_active(incident_durations):
             return True
     return False
 
-def filter_s2_messages(messages):
-    """Фильтрует активные сообщения S2, убирает дубликаты и сортирует по времени."""
+def filter_sbahn_messages(messages, line_label="S2"):
+    """Фильтрует активные сообщения по линии S-Bahn (S1–S8)."""
     seen = {}
     for msg in messages:
         for line in msg.get("lines", []):
-            if line.get("transportType") == "SBAHN" and line.get("label") == "S2":
+            if line.get("transportType") == "SBAHN" and line.get("label") == line_label:
                 if is_active(msg.get("incidentDurations", [])):
                     title = msg.get("title", "").strip()
                     pub = msg.get("publication", 0)
-                    # Сохраняем только самое свежее сообщение с данным заголовком
                     if title in seen:
                         if pub > seen[title].get("publication", 0):
                             seen[title] = msg
                     else:
                         seen[title] = msg
-    # сортируем по времени публикации
     return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
 
-def format_message(messages):
-    """Создает HTML-формат для Telegram."""
+def format_message(messages, line_label="S2"):
     if not messages:
-        return "✅ <b>Keine aktuellen Meldungen für S2.</b>"
+        return f"✅ <b>Keine aktuellen Meldungen für {line_label}.</b>"
 
-    result = ["<b>🚆 Aktuelle Betriebsmeldungen S2:</b>\n"]
+    result = [f"<b>🚆 Aktuelle Betriebsmeldungen {line_label}:</b>\n"]
     for msg in messages:
         title = html.escape(msg.get("title", ""))
         desc = msg.get("description", "")
+        desc = clean_unsupported_html(desc)
         pub = msg.get("publication", 0)
         pub_str = datetime.datetime.utcfromtimestamp(pub / 1000).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
-        # ограничиваем длину preview, добавляем кнопку (или подсказку)
         result.append(
             f"🟢 <b>{title}</b>\n"
             f"<i>({pub_str} UTC)</i>\n\n"
@@ -76,18 +85,33 @@ def format_message(messages):
 # ============================================================
 # 🤖 Telegram handlers
 # ============================================================
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /check — показывает текущие сообщения."""
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает кнопки выбора линии."""
+    keyboard = [
+        [InlineKeyboardButton(f"S{i}", callback_data=f"S{i}") for i in range(1, 5)],
+        [InlineKeyboardButton(f"S{i}", callback_data=f"S{i}") for i in range(5, 9)],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "👋 Wähle eine S-Bahn Linie für aktuelle Meldungen:",
+        reply_markup=reply_markup
+    )
+
+async def handle_line_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора линии пользователем."""
+    query = update.callback_query
+    await query.answer()
+
+    line_label = query.data  # например "S2"
     try:
         data = fetch_messages()
-        s2_msgs = filter_s2_messages(data)
-        message = format_message(s2_msgs)
-        await update.message.reply_text(message, parse_mode="HTML", disable_web_page_preview=True)
+        filtered = filter_sbahn_messages(data, line_label)
+        message = format_message(filtered, line_label)
+        await query.edit_message_text(
+            text=message, parse_mode="HTML", disable_web_page_preview=True
+        )
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при загрузке данных: {e}")
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Привет! Напиши /check, чтобы увидеть актуальные сообщения S2.")
+        await query.edit_message_text(f"❌ Fehler: {e}")
 
 # ============================================================
 # 🚀 Запуск бота
@@ -95,6 +119,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("check", check))
+    app.add_handler(CallbackQueryHandler(handle_line_selection))
     print("✅ Bot is running...")
     app.run_polling()
