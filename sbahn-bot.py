@@ -11,12 +11,17 @@ from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
 )
+from apscheduler.schedulers.background import BackgroundScheduler
+import asyncio
 
 # ============================================================
 # 🔧 Настройки
 # ============================================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")  # токен Telegram из Railway secrets
 URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
+CHAT_ID = os.getenv("CHAT_ID")  # твой Telegram ID
+DEFAULT_LINE = os.getenv("DEFAULT_LINE", "S2")  # линия по умолчанию
+
 
 # ============================================================
 # 🧩 Функции
@@ -35,7 +40,6 @@ def clean_unsupported_html(text):
         if tag.name not in allowed:
             tag.unwrap()
     return str(soup)
-
 
 def is_active(incident_durations):
     """Проверяет, актуально ли сообщение сейчас."""
@@ -66,6 +70,7 @@ def filter_sbahn_messages(messages, line_label="S2"):
     return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
 
 def format_message(messages, line_label="S2"):
+    """Создает HTML-формат сообщений."""
     if not messages:
         return f"✅ <b>Keine aktuellen Meldungen für {line_label}.</b>"
 
@@ -73,7 +78,7 @@ def format_message(messages, line_label="S2"):
     for msg in messages:
         title = html.escape(msg.get("title", ""))
         desc = msg.get("description", "")
-        desc = clean_unsupported_html(desc)
+        desc=clean_unsupported_html(desc)
         pub = msg.get("publication", 0)
         pub_str = datetime.datetime.utcfromtimestamp(pub / 1000).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
@@ -89,7 +94,6 @@ def format_message(messages, line_label="S2"):
 # 🤖 Telegram handlers
 # ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает кнопки выбора линии."""
     keyboard = [
         [InlineKeyboardButton(f"S{i}", callback_data=f"S{i}") for i in range(1, 5)],
         [InlineKeyboardButton(f"S{i}", callback_data=f"S{i}") for i in range(5, 9)],
@@ -101,11 +105,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_line_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора линии пользователем."""
     query = update.callback_query
     await query.answer()
 
-    line_label = query.data  # например "S2"
+    line_label = query.data
     try:
         data = fetch_messages()
         filtered = filter_sbahn_messages(data, line_label)
@@ -117,11 +120,39 @@ async def handle_line_selection(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(f"❌ Fehler: {e}")
 
 # ============================================================
+# 🕒 Автоматическая отправка уведомлений
+# ============================================================
+async def send_daily_update(app):
+    try:
+        data = fetch_messages()
+        filtered = filter_sbahn_messages(data, DEFAULT_LINE)
+        message = format_message(filtered, DEFAULT_LINE)
+        await app.bot.send_message(
+            chat_id=CHAT_ID,
+            text=message,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        print(f"✅ Daily update sent for {DEFAULT_LINE}")
+    except Exception as e:
+        print(f"❌ Error in daily update: {e}")
+
+def start_scheduler(app):
+    scheduler = BackgroundScheduler(timezone="Europe/Berlin")
+    scheduler.add_job(lambda: asyncio.run(send_daily_update(app)), "cron", hour=7, minute=30)
+    scheduler.start()
+    print("🕒 Scheduler started (07:30 daily)")
+
+# ============================================================
 # 🚀 Запуск бота
 # ============================================================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_line_selection))
+
+    # Запуск планировщика
+    start_scheduler(app)
+
     print("✅ Bot is running...")
     app.run_polling()
