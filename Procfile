@@ -1,1 +1,1 @@
-worker: python bot_s2.py
+worker: python sbahn-bot.py
