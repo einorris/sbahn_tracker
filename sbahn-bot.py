@@ -13,7 +13,7 @@ from telegram.ext import (
 # ============================================================
 # 🔧 Настройки
 # ============================================================
-TOKEN = os.getenv("BOT_TOKEN")  # токен Telegram из Railway secrets
+TOKEN = os.getenv("TELEGRAM_TOKEN")  # токен Telegram из Railway secrets
 URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
 
 # ============================================================
