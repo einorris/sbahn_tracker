@@ -3,7 +3,6 @@ import re
 import requests
 import datetime
 import html
-from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -11,17 +10,12 @@ from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
 )
-from apscheduler.schedulers.background import BackgroundScheduler
-import asyncio
 
 # ============================================================
 # 🔧 Настройки
 # ============================================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")  # токен Telegram из Railway secrets
 URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
-CHAT_ID = os.getenv("CHAT_ID")  # твой Telegram ID
-DEFAULT_LINE = os.getenv("DEFAULT_LINE", "S2")  # линия по умолчанию
-
 
 # ============================================================
 # 🧩 Функции
@@ -34,12 +28,11 @@ def fetch_messages():
     return resp.json()
 
 def clean_unsupported_html(text):
-    allowed = ['b', 'i', 'u', 's', 'a', 'code', 'pre']
-    soup = BeautifulSoup(text, "html.parser")
-    for tag in soup.find_all():
-        if tag.name not in allowed:
-            tag.unwrap()
-    return str(soup)
+    # Удаляем теги <p> и </p>, а также другие неподдерживаемые теги.
+    text = re.sub(r"</?p>", "", text)
+    # Можно добавить ещё удаление других тегов при необходимости
+    return text
+
 
 def is_active(incident_durations):
     """Проверяет, актуально ли сообщение сейчас."""
@@ -69,31 +62,25 @@ def filter_sbahn_messages(messages, line_label="S2"):
                         seen[title] = msg
     return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
 
-def format_message(messages, line_label="S2"):
-    """Создает HTML-формат сообщений."""
+def format_message_titles(messages, line_label="S2"):
     if not messages:
-        return f"✅ <b>Keine aktuellen Meldungen für {line_label}.</b>"
+        return f"✅ <b>Keine aktuellen Meldungen für {line_label}.</b>", None
 
     result = [f"<b>🚆 Aktuelle Betriebsmeldungen {line_label}:</b>\n"]
-    for msg in messages:
+    buttons = []
+    for i, msg in enumerate(messages):
         title = html.escape(msg.get("title", ""))
-        desc = msg.get("description", "")
-        desc=clean_unsupported_html(desc)
         pub = msg.get("publication", 0)
         pub_str = datetime.datetime.utcfromtimestamp(pub / 1000).strftime("%d.%m.%Y %H:%M") if pub else "?"
-
-        result.append(
-            f"🟢 <b>{title}</b>\n"
-            f"<i>({pub_str} UTC)</i>\n\n"
-            f"{desc}\n\n"
-            "───────────────\n"
-        )
-    return "\n".join(result)
+        result.append(f"🟢 <b>{title}</b>\n<i>({pub_str} UTC)</i>\n")
+        buttons.append([InlineKeyboardButton("Details", callback_data=f"details_{i}")])
+    return "\n".join(result), InlineKeyboardMarkup(buttons)
 
 # ============================================================
 # 🤖 Telegram handlers
 # ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает кнопки выбора линии."""
     keyboard = [
         [InlineKeyboardButton(f"S{i}", callback_data=f"S{i}") for i in range(1, 5)],
         [InlineKeyboardButton(f"S{i}", callback_data=f"S{i}") for i in range(5, 9)],
@@ -104,44 +91,63 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
+# Модификация обработчика выбора линии:
 async def handle_line_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     line_label = query.data
+    context.user_data["line_label"] = line_label
     try:
         data = fetch_messages()
         filtered = filter_sbahn_messages(data, line_label)
-        message = format_message(filtered, line_label)
+        message, keyboard = format_message_titles(filtered, line_label)
         await query.edit_message_text(
-            text=message, parse_mode="HTML", disable_web_page_preview=True
+            text=message, reply_markup=keyboard, parse_mode="HTML", disable_web_page_preview=True
         )
     except Exception as e:
         await query.edit_message_text(f"❌ Fehler: {e}")
 
-# ============================================================
-# 🕒 Автоматическая отправка уведомлений
-# ============================================================
-async def send_daily_update(app):
-    try:
-        data = fetch_messages()
-        filtered = filter_sbahn_messages(data, DEFAULT_LINE)
-        message = format_message(filtered, DEFAULT_LINE)
-        await app.bot.send_message(
-            chat_id=CHAT_ID,
-            text=message,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-        print(f"✅ Daily update sent for {DEFAULT_LINE}")
-    except Exception as e:
-        print(f"❌ Error in daily update: {e}")
+# --- Обработчик кнопки “Подробнее” ---
+async def handle_details_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-def start_scheduler(app):
-    scheduler = BackgroundScheduler(timezone="Europe/Berlin")
-    scheduler.add_job(lambda: asyncio.run(send_daily_update(app)), "cron", hour=7, minute=30)
-    scheduler.start()
-    print("🕒 Scheduler started (07:30 daily)")
+    # Получаем индекс сообщения из callback_data, например details_0
+    idx = int(query.data.split("_")[1])
+    data = fetch_messages()
+    filtered = filter_sbahn_messages(data, context.user_data.get("line_label", "S2"))
+    msg = filtered[idx]
+
+    title = html.escape(msg.get("title", ""))
+    desc = clean_unsupported_html(msg.get("description", ""))
+
+    pub = msg.get("publication", 0)
+    pub_str = datetime.datetime.utcfromtimestamp(pub / 1000).strftime("%d.%m.%Y %H:%M") if pub else "?"
+
+    text = (
+        f"🟢 <b>{title}</b>\n"
+        f"<i>({pub_str} UTC)</i>\n\n"
+        f"{desc}\n\n"
+        "───────────────"
+    )
+
+    # Добавляем кнопку "Back"
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Back", callback_data="back")]]
+    )
+
+    await query.edit_message_text(text=text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
+
+async def handle_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    line_label = context.user_data.get("line_label", "S2")
+    data = fetch_messages()
+    filtered = filter_sbahn_messages(data, line_label)
+    message, keyboard = format_message_titles(filtered, line_label)
+    await query.edit_message_text(text=message, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
+
 
 # ============================================================
 # 🚀 Запуск бота
@@ -150,9 +156,7 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_line_selection))
-
-    # Запуск планировщика
-    start_scheduler(app)
-
+    app.add_handler(CallbackQueryHandler(handle_details_callback, pattern=r"^details_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_back_callback, pattern="back"))
     print("✅ Bot is running...")
     app.run_polling()
