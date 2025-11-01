@@ -143,8 +143,13 @@ async def show_service_messages(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
 
+        # ✅ сохраняем все сообщения по title для дальнейшего lookup
+        context.user_data["messages"] = {}
+
         for msg in messages:
-            msg_id = str(msg.get("id", msg.get("title", "")))[:50]
+            msg_id = str(msg.get("id") or msg.get("title"))
+            context.user_data["messages"][msg_id] = msg
+
             title = html.escape(msg.get("title", "No title"))
             pub = msg.get("publication")
             pub_str = (
@@ -152,7 +157,7 @@ async def show_service_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 if pub else "?"
             )
 
-            text = f"📰 <b>{title}</b>\n🕓 {pub_str}\n"
+            text = f"📰 <b>{title}</b>\n🕓 {pub_str}"
             keyboard = [[InlineKeyboardButton("🔍 Details", callback_data=f"details_{msg_id}")]]
             await query.message.reply_text(
                 text,
@@ -161,27 +166,25 @@ async def show_service_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
-        # Menu after all messages
         await query.message.reply_text("Choose what to do next:", reply_markup=navigation_buttons())
-
-        # Save message dictionary for details lookup
-        context.user_data["messages"] = {str(msg.get("id", msg.get("title", "")))[:50]: msg for msg in messages}
 
     except Exception as e:
         await query.message.reply_text(f"⚠️ Error: {e}", reply_markup=navigation_buttons())
+
 
 
 async def show_message_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     msg_id = query.data.replace("details_", "")
-    messages = context.user_data.get("messages", {})
 
-    if msg_id not in messages:
+    messages = context.user_data.get("messages", {})
+    msg = messages.get(msg_id)
+
+    if not msg:
         await query.message.reply_text("Message details not found.", reply_markup=navigation_buttons())
         return
 
-    msg = messages[msg_id]
     title = html.escape(msg.get("title", "No title"))
     desc = msg.get("description", "")
     pub = msg.get("publication")
@@ -190,14 +193,18 @@ async def show_message_details(update: Update, context: ContextTypes.DEFAULT_TYP
         if pub else "?"
     )
 
+    # ✅ выводим описание
     text = f"📢 <b>{title}</b>\n🕓 {pub_str}\n\n{desc}"
+
     await query.message.reply_text(
         text,
         parse_mode="HTML",
-        disable_web_page_preview=True,
+        disable_web_page_preview=False,
     )
 
+    # ✅ показываем меню после описания
     await query.message.reply_text("Choose what to do next:", reply_markup=navigation_buttons())
+
 
 
 async def show_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -294,6 +301,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(show_departures_prompt, pattern="^departures"))
     app.add_handler(CallbackQueryHandler(go_back, pattern="^back_main"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_station_input))
+
 
     print("✅ Bot started successfully (polling).")
     app.run_polling()
