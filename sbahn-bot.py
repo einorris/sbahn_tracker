@@ -88,10 +88,8 @@ def _apply_aliases(q: str) -> str:
     }
     return aliases.get(qn, q)
 
-def get_station_id_and_name(station_query):
-    """Return (eva_id, display_name) or (None, None), with fuzzy matching and aliases."""
-    query = _apply_aliases(station_query)
-
+def _station_search(query: str):
+    """Low-level Station Data API call. Returns list or []."""
     url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
     headers = {
         "Accept": "application/json",
@@ -100,39 +98,67 @@ def get_station_id_and_name(station_query):
     }
     r = requests.get(url, headers=headers, params={"searchstring": query}, timeout=12)
     if r.status_code != 200:
-        return None, None
+        return []
+    return r.json().get("result", []) or []
 
-    results = r.json().get("result", []) or []
-    if not results:
-        return None, None
-
-    qn = _norm(query)
-
+def _pick_best_station(results, query_norm: str):
+    """Score candidates and pick best with EVA."""
     best = None
     best_score = -1
     for s in results:
+        if not s.get("evaNumbers"):
+            continue
         name = s.get("name", "")
         nn = _norm(name)
         score = 0
-        if nn == qn:
-            score += 100
-        if nn.startswith(qn) or qn.startswith(nn):
-            score += 50
-        if qn in nn:
-            score += 25
-        if s.get("federalStateCode") == "DE-BY":
-            score += 5
-        if not s.get("evaNumbers"):
-            continue
+        if nn == query_norm:                 score += 100
+        if nn.startswith(query_norm) or query_norm.startswith(nn): score += 50
+        if query_norm in nn:                 score += 25
+        if s.get("federalStateCode") == "DE-BY": score += 5
         if score > best_score:
             best = s
             best_score = score
+    return best
 
-    if not best:
-        return None, None
+def get_station_id_and_name(station_query: str):
+    """
+    Return (eva_id, display_name) or (None, None).
+    Steps:
+      1) aliases (e.g., Ostbahnhof -> Muenchen Ost), exact/contains.
+      2) wildcard "*{query}*"
+      3) "München*{query}*" and "Muenchen*{query}*"
+    """
+    # Step 1: aliases + primary search
+    primary = _apply_aliases(station_query)
+    qn = _norm(primary)
 
-    eva = best["evaNumbers"][0]["number"]
-    return eva, best.get("name") or station_query
+    # Try as-is
+    results = _station_search(primary)
+    best = _pick_best_station(results, qn)
+    if best:
+        eva = best["evaNumbers"][0]["number"]
+        return eva, best.get("name") or station_query
+
+    # Step 2: wildcard "*{query}*"
+    wildcard = f"*{station_query}*"
+    results = _station_search(wildcard)
+    best = _pick_best_station(results, _norm(station_query))
+    if best:
+        eva = best["evaNumbers"][0]["number"]
+        return eva, best.get("name") or station_query
+
+    # Step 3: München*{query}* (UTF-8) and Muenchen*{query}* (ASCII)
+    wild_muc_utf  = f"München*{station_query}*"
+    wild_muc_ascii = f"Muenchen*{station_query}*"
+
+    for variant in (wild_muc_utf, wild_muc_ascii):
+        results = _station_search(variant)
+        best = _pick_best_station(results, _norm(variant.replace("*"," ")))
+        if best:
+            eva = best["evaNumbers"][0]["number"]
+            return eva, best.get("name") or station_query
+
+    return None, None
 
 def parse_db_time_to_aware_dt(code: str, tz: ZoneInfo):
     """Convert DB 'yymmddHHMM' (local time) to aware datetime (Europe/Berlin)."""
@@ -323,9 +349,10 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     rows.sort(key=lambda x: x[1])
+    # Формат: S2 → Holzkirchen at 20:50  (без даты)
     out = f"<b>🚉 Departures from {html.escape(station_name)}</b>\n\n"
     for line_code, dt, dest in rows[:12]:
-        out += f"• {line_code} → {html.escape(dest)} at {dt.strftime('%H:%M')} ({dt.strftime('%d.%m.%Y')})\n"
+        out += f"• {line_code} → {html.escape(dest)} at {dt.strftime('%H:%M')}\n"
 
     await safe_send_html(update.message.reply_text, out)
     await update.message.reply_text("Choose what to do next:", reply_markup=nav_menu())
