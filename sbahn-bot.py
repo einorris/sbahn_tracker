@@ -146,64 +146,85 @@ async def show_departures_prompt(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["expecting_station"] = True
 
 async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles user input for station name and shows departures."""
     if not context.user_data.get("expecting_station"):
         return
+
     context.user_data["expecting_station"] = False
     station_name = update.message.text.strip()
-    await update.message.reply_text(f"Searching departures for {station_name}...")
+    await update.message.reply_text(f"🔍 Searching departures for *{station_name}*...", parse_mode="Markdown")
 
     try:
+        # === 1. Find EVA-ID ===
         station_id = get_station_id(station_name)
         if not station_id:
-            await update.message.reply_text("Station not found.")
+            await update.message.reply_text("🚫 Station not found in Deutsche Bahn database.")
             return
 
         now = datetime.datetime.now()
         hour = now.strftime("%H")
         date = now.strftime("%y%m%d")
-        url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{station_id}/{date}/{hour}"
 
+        url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{station_id}/{date}/{hour}"
         headers = {
             "Accept": "application/xml",
             "DB-Client-Id": CLIENT_ID,
             "DB-Api-Key": API_KEY,
         }
 
+        # === 2. Request Timetable ===
         r = requests.get(url, headers=headers)
         if r.status_code != 200:
-            await update.message.reply_text("Error fetching timetable.")
+            await update.message.reply_text(f"❌ Error fetching timetable (status {r.status_code}).\n\n{r.text[:300]}")
             return
 
-        root = ET.fromstring(r.text)
+        # === 3. Check for empty response ===
+        if not r.text.strip():
+            await update.message.reply_text("⚠️ Empty response from DB API.")
+            return
+
+        # === 4. Parse XML ===
+        try:
+            root = ET.fromstring(r.text)
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Failed to parse XML:\n\n{html.escape(str(e))}")
+            return
+
         rows = []
         for s in root.findall("s"):
             tl = s.find("tl")
             if tl is None:
                 continue
+
             line_code = tl.attrib.get("c", "")
-            if not line_code.startswith("S"):
+            if not line_code.startswith("S"):  # only S-Bahn
                 continue
+
             node = s.find("dp")
             if node is None:
                 continue
+
             time_fmt = parse_db_time(node.attrib.get("pt", ""))
             path = node.attrib.get("ppth", "")
-            destination = path.split("|")[-1] if path else ""
+            destination = path.split("|")[-1] if path else "Unknown"
+
             rows.append((line_code, time_fmt, destination))
 
+        # === 5. Output ===
         if not rows:
-            await update.message.reply_text("No departures found.")
+            await update.message.reply_text("ℹ️ No departures found for this station at the current hour.")
             return
 
         rows.sort(key=lambda x: x[1])
-        text = "<b>🚉 Departures:</b>\n\n"
+        text = f"<b>🚉 Departures for {station_name}</b>\n\n"
         for line, time, dest in rows[:10]:
             text += f"• {line} → {dest} at {time}\n"
 
         await update.message.reply_text(text, parse_mode="HTML")
 
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"💥 Unexpected error: {html.escape(str(e))}")
+
 
 async def handle_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
