@@ -1,3 +1,4 @@
+# sbahn_bot.py
 import os
 import re
 import unicodedata
@@ -69,7 +70,6 @@ def filter_line_messages(messages, line_label):
     return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
 
 def _norm(s: str) -> str:
-    """lowercase, strip accents, collapse spaces"""
     s = unicodedata.normalize("NFKD", s or "")
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = s.lower()
@@ -78,12 +78,13 @@ def _norm(s: str) -> str:
 
 def _apply_aliases(q: str) -> str:
     qn = _norm(q)
-    # common Munich aliases
     aliases = {
         "ostbahnhof": "muenchen ost",
         "muenchen ostbahnhof": "muenchen ost",
         "hauptbahnhof": "muenchen hbf",
         "muenchen hauptbahnhof": "muenchen hbf",
+        "munich east": "muenchen ost",
+        "munich main": "muenchen hbf",
     }
     return aliases.get(qn, q)
 
@@ -107,7 +108,6 @@ def get_station_id_and_name(station_query):
 
     qn = _norm(query)
 
-    # score candidates
     best = None
     best_score = -1
     for s in results:
@@ -120,10 +120,8 @@ def get_station_id_and_name(station_query):
             score += 50
         if qn in nn:
             score += 25
-        # prefer Bavaria / Munich region if tied
         if s.get("federalStateCode") == "DE-BY":
             score += 5
-        # must have EVA
         if not s.get("evaNumbers"):
             continue
         if score > best_score:
@@ -167,20 +165,20 @@ def line_picker_markup():
     ]
     return InlineKeyboardMarkup(rows)
 
-def safe_send_html(message_func, text_html: str):
+# --- safe HTML sender (async) ---
+async def safe_send_html(message_func, text_html: str):
     """
-    Try sending as HTML; if Telegram rejects (BadRequest: can't parse entities),
-    fall back to plain text (tags removed, <br> and </p> -> newlines).
+    Try to send as HTML; if Telegram rejects (unsupported tags), fall back to plain text.
     """
     try:
-        return message_func(text_html, parse_mode="HTML", disable_web_page_preview=True)
+        return await message_func(text_html, parse_mode="HTML", disable_web_page_preview=True)
     except BadRequest:
-        # fallback: strip tags to plain text
-        txt = re.sub(r"(?i)<\s*br\s*/?>", "\n", text_html)
-        txt = re.sub(r"(?i)</\s*p\s*>", "\n\n", txt)
-        txt = re.sub(r"<[^>]+>", "", txt)
+        txt = text_html
+        txt = re.sub(r"(?is)<\s*br\b[^>]*>", "\n", txt)   # <br ...> -> NL
+        txt = re.sub(r"(?is)</\s*p\s*>", "\n\n", txt)     # </p> -> blank line
+        txt = re.sub(r"(?is)<[^>]+>", "", txt)            # strip all tags
         txt = html.unescape(txt)
-        return message_func(txt, disable_web_page_preview=True)
+        return await message_func(txt, disable_web_page_preview=True)
 
 # ================== BOT HANDLERS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -211,7 +209,6 @@ async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = fetch_messages()
         msgs = filter_line_messages(data, line)
 
-        # save for details lookups
         context.user_data["msg_map"] = {}
 
         if not msgs:
@@ -233,7 +230,6 @@ async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Details", callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
             await q.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
-        # nav AFTER content
         await q.message.reply_text("Choose what to do next:", reply_markup=nav_menu())
 
     except Exception as e:
@@ -256,7 +252,6 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pub_s = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
     text_html = f"📢 <b>{title}</b>\n🕓 {pub_s} UTC\n\n{desc}"
-    # safe HTML send with fallback to plain text
     await safe_send_html(q.message.reply_text, text_html)
     await q.message.reply_text("Choose what to do next:", reply_markup=nav_menu())
 
@@ -317,7 +312,6 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dt   = parse_db_time_to_aware_dt(code, tz)
             if not dt:
                 continue
-            # Only departures in the next 60 minutes (exclude past)
             if not (now_local <= dt <= horizon):
                 continue
             path = dp.attrib.get("ppth", "")
@@ -333,19 +327,8 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for line_code, dt, dest in rows[:12]:
         out += f"• {line_code} → {html.escape(dest)} at {dt.strftime('%H:%M')} ({dt.strftime('%d.%m.%Y')})\n"
 
-    await qsafe(update.message.reply_text, out)  # uses same safe html sender
+    await safe_send_html(update.message.reply_text, out)
     await update.message.reply_text("Choose what to do next:", reply_markup=nav_menu())
-
-# small wrapper so we can reuse safe html send above
-async def qsafe(sender, text_html):
-    try:
-        await sender(text_html, parse_mode="HTML", disable_web_page_preview=True)
-    except BadRequest:
-        txt = re.sub(r"(?i)<\s*br\s*/?>", "\n", text_html)
-        txt = re.sub(r"(?i)</\s*p\s*>", "\n\n", txt)
-        txt = re.sub(r"<[^>]+>", "", txt)
-        txt = html.unescape(txt)
-        await sender(txt, disable_web_page_preview=True)
 
 # ----- Back / Change line -----
 async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
