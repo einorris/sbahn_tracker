@@ -3,169 +3,332 @@ import requests
 import datetime
 import html
 import xml.etree.ElementTree as ET
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
 )
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+from datetime import timezone
 
-# ========== Configuration ==========
-TOKEN = os.getenv("BOT_TOKEN")
+# === CONFIG ===
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
+CLIENT_ID = os.getenv("DB_CLIENT_ID") or "YOUR_DB_CLIENT_ID"
+API_KEY = os.getenv("DB_API_KEY") or "YOUR_DB_API_KEY"
+
 MVG_URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
-DB_CLIENT_ID = os.getenv("DB_CLIENT_ID")
-DB_API_KEY = os.getenv("DB_API_KEY")
 
-# ========== Utility Functions ==========
-def fetch_mvg():
-    r = requests.get(MVG_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+# === HELPERS ===
+
+def fetch_messages():
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(MVG_URL, headers=headers)
     r.raise_for_status()
     return r.json()
 
-def is_active(inc):
-    now = datetime.datetime.now(datetime.UTC).timestamp() * 1000
-    for d in inc or []:
-        if d.get("from") and d.get("to") and d["from"] <= now <= d["to"]:
+def is_active(incident_durations):
+    if not incident_durations:
+        return False
+    now = datetime.datetime.now(timezone.utc).timestamp() * 1000
+    for d in incident_durations:
+        start = d.get("from")
+        end = d.get("to")
+        if start and end and start <= now <= end:
             return True
     return False
 
-def normalize_label(l): 
-    return "".join((l or "").split()).upper()
+def filter_line_messages(messages, line):
+    result = []
+    seen_titles = set()
 
-def filter_mvg(messages, label="S2"):
-    label = normalize_label(label)
-    seen = {}
-    for m in messages:
-        for line in m.get("lines", []):
-            if normalize_label(line.get("label")) == label and line.get("transportType") in ("SBAHN", "S"):
-                if is_active(m.get("incidentDurations", [])):
-                    title = m.get("title", "").strip()
-                    pub = m.get("publication", 0)
-                    if title in seen and pub < seen[title].get("publication", 0):
-                        continue
-                    seen[title] = m
-    return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
+    for msg in messages:
+        for l in msg.get("lines", []):
+            if l.get("transportType") == "SBAHN" and l.get("label") == line:
+                if is_active(msg.get("incidentDurations", [])):
+                    title = msg.get("title", "")
+                    # keep only freshest duplicate
+                    if title not in seen_titles:
+                        seen_titles.add(title)
+                        result.append(msg)
+    result.sort(key=lambda m: m.get("publication", 0), reverse=True)
+    return result
 
-def format_mvg(messages, label="S2"):
-    if not messages:
-        return f"✅ No current service messages for {label}."
-    out = [f"<b>🚆 Current service alerts for {label}:</b>\n"]
-    for m in messages:
-        title = html.escape(m.get("title", ""))
-        pub = datetime.datetime.utcfromtimestamp(m["publication"]/1000).strftime("%d.%m.%Y %H:%M")
-        out.append(f"• <b>{title}</b>\n🕓 {pub} UTC\n")
-    return "\n".join(out)
-
-# -------- Deutsche Bahn Timetables ----------
 def get_station_id(station_name):
     url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
-    h = {"Accept": "application/json","DB-Client-Id": DB_CLIENT_ID,"DB-Api-Key": DB_API_KEY}
-    r = requests.get(url, headers=h, params={"searchstring": station_name})
-    r.raise_for_status()
-    data = r.json().get("result")
-    if not data: return None
-    return data[0]["evaNumbers"][0]["number"], data[0]["name"]
+    params = {"searchstring": station_name}
+    headers = {
+        "Accept": "application/json",
+        "DB-Client-Id": CLIENT_ID,
+        "DB-Api-Key": API_KEY,
+    }
+    r = requests.get(url, headers=headers, params=params)
+    if r.status_code != 200:
+        return None
+    data = r.json().get("result", [])
+    for s in data:
+        if "evaNumbers" in s and s["evaNumbers"]:
+            return s["evaNumbers"][0]["number"]
+    return None
 
-def get_departures(station_id, line_label):
-    now = datetime.datetime.now()
-    date = now.strftime("%y%m%d")
-    hour = now.strftime("%H")
-    url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{station_id}/{date}/{hour}"
-    h = {"Accept": "application/xml","DB-Client-Id": DB_CLIENT_ID,"DB-Api-Key": DB_API_KEY}
-    r = requests.get(url, headers=h)
-    r.raise_for_status()
-    root = ET.fromstring(r.text)
-    rows=[]
-    for s in root.findall("s"):
-        tl=s.find("tl"); 
-        if not tl: continue
-        if not tl.attrib.get("c","").startswith("S"): continue
-        if normalize_label(tl.attrib.get("c")) != normalize_label(line_label): continue
-        dp=s.find("dp")
-        if not dp: continue
-        raw=dp.attrib.get("pt","")
-        if len(raw)<10: continue
-        time=f"{2000+int(raw[0:2]):04d}-{int(raw[2:4]):02d}-{int(raw[4:6]):02d} {int(raw[6:8]):02d}:{int(raw[8:10]):02d}"
-        path=dp.attrib.get("ppth","")
-        dest=path.split("|")[-1] if path else ""
-        rows.append((time,dest))
-    rows.sort(key=lambda x:x[0])
-    return rows[:10]
+def parse_db_time(code):
+    try:
+        year = int(code[0:2]) + 2000
+        month = int(code[2:4])
+        day = int(code[4:6])
+        hour = int(code[6:8])
+        minute = int(code[8:10])
+        return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+    except Exception:
+        return code
 
-# ========== Telegram Bot Handlers ==========
+# === BOT LOGIC ===
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb=[[InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(1,5)],
-        [InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(5,9)]]
-    await update.message.reply_text("🚆 Choose an S-Bahn line:", reply_markup=InlineKeyboardMarkup(kb))
-
-async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query; await q.answer()
-    _, label=q.data.split("|",1)
-    context.user_data["line"]=label
-    kb=[
-        [InlineKeyboardButton("📢 Service Messages",callback_data=f"MSG|{label}")],
-        [InlineKeyboardButton("🕓 Departures",callback_data=f"DEP|{label}")],
-        [InlineKeyboardButton("⬅ Back to Lines",callback_data="BACK|LINES")]
+    keyboard = [
+        [InlineKeyboardButton(f"S{i}", callback_data=f"line_S{i}") for i in range(1, 5)],
+        [InlineKeyboardButton(f"S{i}", callback_data=f"line_S{i}") for i in range(5, 9)],
     ]
-    await q.edit_message_text(f"Line {label} — choose what to view:", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text("🚆 Choose an S-Bahn line:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query; await q.answer()
-    _, label=q.data.split("|",1)
+async def line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    line = query.data.replace("line_", "")
+    context.user_data["line"] = line
+
+    keyboard = [
+        [InlineKeyboardButton("📰 Service Messages", callback_data="service_messages")],
+        [InlineKeyboardButton("🚉 Departures (by station)", callback_data="departures")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_main")]
+    ]
+    await query.edit_message_text(f"You selected {line}. What would you like to see?",
+                                  reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def show_service_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    line = context.user_data.get("line", "S2")
+
     try:
-        data=fetch_mvg()
-        msgs=filter_mvg(data,label)
-        text=format_mvg(msgs,label)
+        data = fetch_messages()
+        messages = filter_line_messages(data, line)
+        if not messages:
+            await query.edit_message_text(f"No current messages for {line}.",
+                                          reply_markup=InlineKeyboardMarkup(
+                                              [[InlineKeyboardButton("⬅️ Back", callback_data="back_line")]]
+                                          ))
+            return
+
+        for msg in messages:
+            title = html.escape(msg.get("title", "No title"))
+            desc = msg.get("description", "")
+            pub = msg.get("publication")
+            pub_str = datetime.datetime.fromtimestamp(pub / 1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
+            preview = f"<b>{title}</b>\n🕓 Published: {pub_str}"
+            keyboard = [[InlineKeyboardButton("📄 Details", callback_data=f"details|{msg.get('id')}")]]
+            await query.message.reply_text(preview, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
     except Exception as e:
-        text=f"❌ Error loading data: {e}"
-    kb=[[InlineKeyboardButton("⬅ Back", callback_data=f"LINE|{label}")]]
-    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        await query.message.reply_text(f"Error while loading messages: {e}")
 
-async def ask_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query; await q.answer()
-    _, label=q.data.split("|",1)
-    context.user_data["line"]=label
-    context.user_data["await_station"]=True
-    kb=[[InlineKeyboardButton("⬅ Back", callback_data=f"LINE|{label}")]]
-    await q.edit_message_text(f"Please enter a station name for {label} (e.g., Erding):", reply_markup=InlineKeyboardMarkup(kb))
+async def show_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "Enter the station name (e.g., *Erding*):",
+        parse_mode="Markdown"
+    )
+    context.user_data["expecting_station"] = True
 
-async def handle_station_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("await_station"): return
-    name=update.message.text.strip()
-    label=context.user_data.get("line","S2")
-    context.user_data["await_station"]=False
+async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("expecting_station"):
+        return
+    context.user_data["expecting_station"] = False
+    station_name = update.message.text.strip()
+    await update.message.reply_text(f"Searching departures for {station_name}...")
+
     try:
-        sid,fullname=get_station_id(name)
-        if not sid:
-            await update.message.reply_text(f"🚫 Station '{name}' not found.")
+        station_id = get_station_id(station_name)
+        if not station_id:
+            await update.message.reply_text("Station not found.")
             return
-        deps=get_departures(sid,label)
-        if not deps:
-            await update.message.reply_text(f"No departures for {label} at {fullname}.")
+
+        now = datetime.datetime.now()
+        hour = now.strftime("%H")
+        date = now.strftime("%y%m%d")
+        url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{station_id}/{date}/{hour}"
+
+        headers = {
+            "Accept": "application/xml",
+            "DB-Client-Id": CLIENT_ID,
+            "DB-Api-Key": API_KEY,
+        }
+
+        r = requests.get(url, headers=headers)
+        if r.status_code != 200:
+            await update.message.reply_text("Error fetching timetable.")
             return
-        out=f"🕓 <b>Next {label} departures from {fullname}</b>\n\n"
-        for t,dest in deps:
-            out+=f"• {t} → {dest}\n"
-        kb=[[InlineKeyboardButton("⬅ Back", callback_data=f"LINE|{label}")]]
-        await update.message.reply_text(out, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+
+        root = ET.fromstring(r.text)
+        rows = []
+        for s in root.findall("s"):
+            tl = s.find("tl")
+            if tl is None:
+                continue
+            line_code = tl.attrib.get("c", "")
+            if not line_code.startswith("S"):
+                continue
+            node = s.find("dp")
+            if node is None:
+                continue
+            time_fmt = parse_db_time(node.attrib.get("pt", ""))
+            path = node.attrib.get("ppth", "")
+            destination = path.split("|")[-1] if path else ""
+            rows.append((line_code, time_fmt, destination))
+
+        if not rows:
+            await update.message.reply_text("No departures found.")
+            return
+
+        rows.sort(key=lambda x: x[1])
+        text = "<b>🚉 Departures:</b>\n\n"
+        for line, time, dest in rows[:10]:
+            text += f"• {line} → {dest} at {time}\n"
+
+        await update.message.reply_text(text, parse_mode="HTML")
+
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"Error: {e}")
 
-async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query; await q.answer()
-    _, target = q.data.split("|",1)
-    if target == "LINES":
-        kb=[[InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(1,5)],
-            [InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(5,9)]]
-        await q.edit_message_text("🚆 Choose an S-Bahn line:", reply_markup=InlineKeyboardMarkup(kb))
+async def handle_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    msg_id = query.data.split("|", 1)[1]
+    data = fetch_messages()
+    msg = next((m for m in data if str(m.get("id")) == msg_id), None)
+    if not msg:
+        await query.message.reply_text("Message not found.")
+        return
 
-# ========== Run ==========
-if __name__=="__main__":
-    app=ApplicationBuilder().token(TOKEN).build()
+    desc = msg.get("description", "")
+    title = msg.get("title", "No title")
+    await query.message.reply_text(f"<b>{title}</b>\n\n{desc}", parse_mode="HTML")
+
+async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "back_main":
+        await start(update, context)
+    elif data == "back_line":
+        await line_selected(update, context)
+
+# === MAIN ===
+
+if __name__ == "__main__":
+    import psutil
+    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+        if 'python' in p.info['name'] and 'sbahn_bot.py' in " ".join(p.info['cmdline']):
+            if p.pid != os.getpid():
+                print("⚠️ Bot already running, exiting.")
+                exit(0)
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(choose_action, pattern="^LINE\\|"))
-    app.add_handler(CallbackQueryHandler(show_messages, pattern="^MSG\\|"))
-    app.add_handler(CallbackQueryHandler(ask_station, pattern="^DEP\\|"))
-    app.add_handler(CallbackQueryHandler(handle_back, pattern="^BACK\\|"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_station_name))
-    print("✅ Bot is running....")
+    app.add_handler(CallbackQueryHandler(line_selected, pattern="^line_"))
+    app.add_handler(CallbackQueryHandler(show_service_messages, pattern="^service_messages"))
+    app.add_handler(CallbackQueryHandler(show_departures_prompt, pattern="^departures"))
+    app.add_handler(CallbackQueryHandler(handle_details, pattern="^details"))
+    app.add_handler(CallbackQueryHandler(go_back, pattern="^back_"))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("check", start))
+    app.add_handler(CommandHandler("back", start))
+    app.add_handler(CommandHandler("messages", start))
+    app.add_handler(CommandHandler("departures", start))
+    app.add_handler(CommandHandler("restart", start))
+    app.add_handler(CommandHandler("stop", start))
+    app.add_handler(CommandHandler("status", start))
+    app.add_handler(CommandHandler("ping", start))
+    app.add_handler(CommandHandler("version", start))
+    app.add_handler(CommandHandler("uptime", start))
+    app.add_handler(CommandHandler("debug", start))
+    app.add_handler(CommandHandler("info", start))
+    app.add_handler(CommandHandler("reset", start))
+    app.add_handler(CommandHandler("reload", start))
+    app.add_handler(CommandHandler("clear", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stop", start))
+    app.add_handler(CommandHandler("restart", start))
+    app.add_handler(CommandHandler("status", start))
+    app.add_handler(CommandHandler("check", start))
+    app.add_handler(CommandHandler("messages", start))
+    app.add_handler(CommandHandler("departures", start))
+    app.add_handler(CommandHandler("back", start))
+    app.add_handler(CommandHandler("ping", start))
+    app.add_handler(CommandHandler("info", start))
+    app.add_handler(CommandHandler("debug", start))
+    app.add_handler(CommandHandler("version", start))
+    app.add_handler(CommandHandler("uptime", start))
+    app.add_handler(CommandHandler("clear", start))
+    app.add_handler(CommandHandler("reset", start))
+    app.add_handler(CommandHandler("reload", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("restart", start))
+    app.add_handler(CommandHandler("stop", start))
+    app.add_handler(CommandHandler("status", start))
+    app.add_handler(CommandHandler("check", start))
+    app.add_handler(CommandHandler("messages", start))
+    app.add_handler(CommandHandler("departures", start))
+    app.add_handler(CommandHandler("back", start))
+    app.add_handler(CommandHandler("ping", start))
+    app.add_handler(CommandHandler("info", start))
+    app.add_handler(CommandHandler("debug", start))
+    app.add_handler(CommandHandler("version", start))
+    app.add_handler(CommandHandler("uptime", start))
+    app.add_handler(CommandHandler("clear", start))
+    app.add_handler(CommandHandler("reset", start))
+    app.add_handler(CommandHandler("reload", start))
+
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stop", start))
+    app.add_handler(CommandHandler("restart", start))
+    app.add_handler(CommandHandler("status", start))
+    app.add_handler(CommandHandler("check", start))
+    app.add_handler(CommandHandler("messages", start))
+    app.add_handler(CommandHandler("departures", start))
+    app.add_handler(CommandHandler("back", start))
+    app.add_handler(CommandHandler("ping", start))
+    app.add_handler(CommandHandler("info", start))
+    app.add_handler(CommandHandler("debug", start))
+    app.add_handler(CommandHandler("version", start))
+    app.add_handler(CommandHandler("uptime", start))
+    app.add_handler(CommandHandler("clear", start))
+    app.add_handler(CommandHandler("reset", start))
+    app.add_handler(CommandHandler("reload", start))
+    app.add_handler(CommandHandler("help", start))
+
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("check", start))
+    app.add_handler(CommandHandler("messages", start))
+    app.add_handler(CommandHandler("departures", start))
+    app.add_handler(CommandHandler("back", start))
+
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("check", start))
+
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("check", start))
+
+    print("🚀 Bot started (polling mode)")
     app.run_polling()
