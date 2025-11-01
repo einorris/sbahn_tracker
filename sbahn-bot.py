@@ -43,7 +43,7 @@ def is_active(incident_durations):
 
 
 def filter_line_messages(messages, line):
-    """Filter only active messages for a given S-Bahn line, keeping only the newest per title"""
+    """Filter active messages for given S-Bahn line, keeping newest per title"""
     result = []
     seen_titles = set()
     for msg in messages:
@@ -89,13 +89,12 @@ def parse_db_time(code):
 
 
 def navigation_buttons():
-    """Universal navigation block shown after each output"""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📰 Show Messages", callback_data="service_messages"),
             InlineKeyboardButton("🚉 Show Departures", callback_data="departures"),
         ],
-        [InlineKeyboardButton("🆕 Change Line", callback_data="back_main")]
+        [InlineKeyboardButton("🆕 Change Line", callback_data="back_main")],
     ])
 
 
@@ -117,7 +116,6 @@ async def line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     line = query.data.replace("line_", "")
     context.user_data["line"] = line
 
-    # сразу показываем действия
     keyboard = [
         [InlineKeyboardButton("📰 Service Messages", callback_data="service_messages")],
         [InlineKeyboardButton("🚉 Departures (by station)", callback_data="departures")],
@@ -145,42 +143,71 @@ async def show_service_messages(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
 
-        text = f"📰 <b>Service Messages for {line}</b>\n\n"
         for msg in messages:
+            msg_id = str(msg.get("id", msg.get("title", "")))[:50]
             title = html.escape(msg.get("title", "No title"))
             pub = msg.get("publication")
             pub_str = (
                 datetime.datetime.fromtimestamp(pub / 1000, datetime.UTC).strftime("%d.%m.%Y %H:%M")
                 if pub else "?"
             )
-            text += f"• <b>{title}</b>\n🕓 {pub_str}\n"
-            text += f"<a href='tg://resolve?domain=none'>{msg.get('type','')}</a>\n\n"  # just spacer
 
-        await query.message.reply_text(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
+            text = f"📰 <b>{title}</b>\n🕓 {pub_str}\n"
+            keyboard = [[InlineKeyboardButton("🔍 Details", callback_data=f"details_{msg_id}")]]
+            await query.message.reply_text(
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
 
-        # меню появляется ПОСЛЕ контента
+        # Menu after all messages
         await query.message.reply_text("Choose what to do next:", reply_markup=navigation_buttons())
 
+        # Save message dictionary for details lookup
+        context.user_data["messages"] = {str(msg.get("id", msg.get("title", "")))[:50]: msg for msg in messages}
+
     except Exception as e:
-        await query.message.reply_text(f"⚠️ Error while loading: {e}", reply_markup=navigation_buttons())
+        await query.message.reply_text(f"⚠️ Error: {e}", reply_markup=navigation_buttons())
+
+
+async def show_message_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    msg_id = query.data.replace("details_", "")
+    messages = context.user_data.get("messages", {})
+
+    if msg_id not in messages:
+        await query.message.reply_text("Message details not found.", reply_markup=navigation_buttons())
+        return
+
+    msg = messages[msg_id]
+    title = html.escape(msg.get("title", "No title"))
+    desc = msg.get("description", "")
+    pub = msg.get("publication")
+    pub_str = (
+        datetime.datetime.fromtimestamp(pub / 1000, datetime.UTC).strftime("%d.%m.%Y %H:%M")
+        if pub else "?"
+    )
+
+    text = f"📢 <b>{title}</b>\n🕓 {pub_str}\n\n{desc}"
+    await query.message.reply_text(
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+    await query.message.reply_text("Choose what to do next:", reply_markup=navigation_buttons())
 
 
 async def show_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
-        "Please enter the station name (e.g., *Erding*):",
-        parse_mode="Markdown"
-    )
+    await query.edit_message_text("Please enter the station name (e.g., *Erding*):", parse_mode="Markdown")
     context.user_data["expecting_station"] = True
 
 
 async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles station input and shows timetable"""
     if not context.user_data.get("expecting_station"):
         return
 
@@ -191,10 +218,7 @@ async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         station_id = get_station_id(station_name)
         if not station_id:
-            await update.message.reply_text(
-                "🚫 Station not found in Deutsche Bahn database.",
-                reply_markup=navigation_buttons(),
-            )
+            await update.message.reply_text("🚫 Station not found.", reply_markup=navigation_buttons())
             return
 
         now = datetime.datetime.now()
@@ -214,10 +238,8 @@ async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYP
             r = requests.get(url, headers=headers)
 
         if r.status_code != 200:
-            await update.message.reply_text(
-                f"❌ Error fetching timetable (status {r.status_code}).",
-                reply_markup=navigation_buttons(),
-            )
+            await update.message.reply_text(f"❌ Error fetching timetable ({r.status_code})",
+                                            reply_markup=navigation_buttons())
             return
 
         root = ET.fromstring(r.text)
@@ -238,10 +260,7 @@ async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYP
             rows.append((line_code, time_fmt, destination))
 
         if not rows:
-            await update.message.reply_text(
-                "ℹ️ No departures found for this station right now.",
-                reply_markup=navigation_buttons(),
-            )
+            await update.message.reply_text("ℹ️ No departures right now.", reply_markup=navigation_buttons())
             return
 
         rows.sort(key=lambda x: x[1])
@@ -249,20 +268,11 @@ async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYP
         for line, time, dest in rows[:10]:
             text += f"• {line} → {dest} at {time}\n"
 
-        await update.message.reply_text(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-
-        # меню ПОСЛЕ вывода
+        await update.message.reply_text(text, parse_mode="HTML")
         await update.message.reply_text("Choose what to do next:", reply_markup=navigation_buttons())
 
     except Exception as e:
-        await update.message.reply_text(
-            f"💥 Unexpected error: {html.escape(str(e))}",
-            reply_markup=navigation_buttons(),
-        )
+        await update.message.reply_text(f"💥 Error: {html.escape(str(e))}", reply_markup=navigation_buttons())
 
 
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,6 +290,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(line_selected, pattern="^line_"))
     app.add_handler(CallbackQueryHandler(show_service_messages, pattern="^service_messages"))
+    app.add_handler(CallbackQueryHandler(show_message_details, pattern="^details_"))
     app.add_handler(CallbackQueryHandler(show_departures_prompt, pattern="^departures"))
     app.add_handler(CallbackQueryHandler(go_back, pattern="^back_main"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_station_input))
