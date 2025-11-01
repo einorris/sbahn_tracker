@@ -1,9 +1,12 @@
 import os
+import re
+import unicodedata
+import hashlib
+import html
 import requests
 import datetime
-import html
 import xml.etree.ElementTree as ET
-import hashlib
+
 from datetime import timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -16,6 +19,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.error import BadRequest
 
 # ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
@@ -64,24 +68,76 @@ def filter_line_messages(messages, line_label):
                         seen[title] = msg
     return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
 
-def get_station_id_and_name(station_name):
+def _norm(s: str) -> str:
+    """lowercase, strip accents, collapse spaces"""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _apply_aliases(q: str) -> str:
+    qn = _norm(q)
+    # common Munich aliases
+    aliases = {
+        "ostbahnhof": "muenchen ost",
+        "muenchen ostbahnhof": "muenchen ost",
+        "hauptbahnhof": "muenchen hbf",
+        "muenchen hauptbahnhof": "muenchen hbf",
+    }
+    return aliases.get(qn, q)
+
+def get_station_id_and_name(station_query):
+    """Return (eva_id, display_name) or (None, None), with fuzzy matching and aliases."""
+    query = _apply_aliases(station_query)
+
     url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
     headers = {
         "Accept": "application/json",
         "DB-Client-Id": CLIENT_ID,
         "DB-Api-Key": API_KEY,
     }
-    r = requests.get(url, headers=headers, params={"searchstring": station_name}, timeout=12)
+    r = requests.get(url, headers=headers, params={"searchstring": query}, timeout=12)
     if r.status_code != 200:
         return None, None
-    data = r.json().get("result", [])
-    for s in data:
-        if s.get("evaNumbers"):
-            return s["evaNumbers"][0]["number"], s.get("name", station_name)
-    return None, None
+
+    results = r.json().get("result", []) or []
+    if not results:
+        return None, None
+
+    qn = _norm(query)
+
+    # score candidates
+    best = None
+    best_score = -1
+    for s in results:
+        name = s.get("name", "")
+        nn = _norm(name)
+        score = 0
+        if nn == qn:
+            score += 100
+        if nn.startswith(qn) or qn.startswith(nn):
+            score += 50
+        if qn in nn:
+            score += 25
+        # prefer Bavaria / Munich region if tied
+        if s.get("federalStateCode") == "DE-BY":
+            score += 5
+        # must have EVA
+        if not s.get("evaNumbers"):
+            continue
+        if score > best_score:
+            best = s
+            best_score = score
+
+    if not best:
+        return None, None
+
+    eva = best["evaNumbers"][0]["number"]
+    return eva, best.get("name") or station_query
 
 def parse_db_time_to_aware_dt(code: str, tz: ZoneInfo):
-    """Convert DB 'yymmddHHMM' to aware datetime (Europe/Berlin)."""
+    """Convert DB 'yymmddHHMM' (local time) to aware datetime (Europe/Berlin)."""
     try:
         yy = int(code[0:2]); mm = int(code[2:4]); dd = int(code[4:6])
         HH = int(code[6:8]);  MM = int(code[8:10])
@@ -110,6 +166,21 @@ def line_picker_markup():
         [InlineKeyboardButton(f"S{i}", callback_data=f"{CB_LINE_PREFIX}S{i}") for i in range(5,9)],
     ]
     return InlineKeyboardMarkup(rows)
+
+def safe_send_html(message_func, text_html: str):
+    """
+    Try sending as HTML; if Telegram rejects (BadRequest: can't parse entities),
+    fall back to plain text (tags removed, <br> and </p> -> newlines).
+    """
+    try:
+        return message_func(text_html, parse_mode="HTML", disable_web_page_preview=True)
+    except BadRequest:
+        # fallback: strip tags to plain text
+        txt = re.sub(r"(?i)<\s*br\s*/?>", "\n", text_html)
+        txt = re.sub(r"(?i)</\s*p\s*>", "\n\n", txt)
+        txt = re.sub(r"<[^>]+>", "", txt)
+        txt = html.unescape(txt)
+        return message_func(txt, disable_web_page_preview=True)
 
 # ================== BOT HANDLERS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,12 +251,13 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     title = html.escape(m.get("title", "No title"))
-    desc  = m.get("description", "")
+    desc  = m.get("description", "") or ""
     pub   = m.get("publication")
     pub_s = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
-    text = f"📢 <b>{title}</b>\n🕓 {pub_s} UTC\n\n{desc}"
-    await q.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=False)
+    text_html = f"📢 <b>{title}</b>\n🕓 {pub_s} UTC\n\n{desc}"
+    # safe HTML send with fallback to plain text
+    await safe_send_html(q.message.reply_text, text_html)
     await q.message.reply_text("Choose what to do next:", reply_markup=nav_menu())
 
 # ----- Departures -----
@@ -193,7 +265,7 @@ async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     q = update.callback_query
     await q.answer()
     context.user_data["await_station"] = True
-    await q.edit_message_text("Please enter the station name (e.g., *Erding*):", parse_mode="Markdown")
+    await q.edit_message_text("Please enter the station name (e.g., *Erding* or *Ostbahnhof*):", parse_mode="Markdown")
 
 async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("await_station"):
@@ -261,8 +333,19 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for line_code, dt, dest in rows[:12]:
         out += f"• {line_code} → {html.escape(dest)} at {dt.strftime('%H:%M')} ({dt.strftime('%d.%m.%Y')})\n"
 
-    await update.message.reply_text(out, parse_mode="HTML", disable_web_page_preview=True)
+    await qsafe(update.message.reply_text, out)  # uses same safe html sender
     await update.message.reply_text("Choose what to do next:", reply_markup=nav_menu())
+
+# small wrapper so we can reuse safe html send above
+async def qsafe(sender, text_html):
+    try:
+        await sender(text_html, parse_mode="HTML", disable_web_page_preview=True)
+    except BadRequest:
+        txt = re.sub(r"(?i)<\s*br\s*/?>", "\n", text_html)
+        txt = re.sub(r"(?i)</\s*p\s*>", "\n\n", txt)
+        txt = re.sub(r"<[^>]+>", "", txt)
+        txt = html.unescape(txt)
+        await sender(txt, disable_web_page_preview=True)
 
 # ----- Back / Change line -----
 async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,11 +363,11 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
 
     # Callbacks
-    app.add_handler(CallbackQueryHandler(on_line_selected,     pattern=r"^L:"))       # L:S2
-    app.add_handler(CallbackQueryHandler(on_show_messages,     pattern=r"^A:MSG$"))
-    app.add_handler(CallbackQueryHandler(on_departures_prompt, pattern=r"^A:DEP$"))
-    app.add_handler(CallbackQueryHandler(on_back_main,         pattern=r"^B:MAIN$"))
-    app.add_handler(CallbackQueryHandler(on_details,           pattern=r"^D:"))
+    app.add_handler(CallbackQueryHandler(on_line_selected,       pattern=r"^L:"))       # L:S2
+    app.add_handler(CallbackQueryHandler(on_show_messages,       pattern=r"^A:MSG$"))
+    app.add_handler(CallbackQueryHandler(on_departures_prompt,   pattern=r"^A:DEP$"))
+    app.add_handler(CallbackQueryHandler(on_back_main,           pattern=r"^B:MAIN$"))
+    app.add_handler(CallbackQueryHandler(on_details,             pattern=r"^D:"))
 
     # Free text for station input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
