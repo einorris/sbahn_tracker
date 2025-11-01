@@ -50,7 +50,7 @@ def filter_line_messages(messages, line):
             if l.get("transportType") == "SBAHN" and l.get("label") == line:
                 if is_active(msg.get("incidentDurations", [])):
                     title = msg.get("title", "")
-                    if title not in seen_titles:  # keep only freshest
+                    if title not in seen_titles:
                         seen_titles.add(title)
                         result.append(msg)
     result.sort(key=lambda m: m.get("publication", 0), reverse=True)
@@ -87,6 +87,17 @@ def parse_db_time(code):
         return code
 
 
+def navigation_buttons():
+    """Universal navigation block after each output"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📰 Show Messages", callback_data="service_messages"),
+            InlineKeyboardButton("🚉 Show Departures", callback_data="departures"),
+        ],
+        [InlineKeyboardButton("🆕 Change Line", callback_data="back_main")]
+    ])
+
+
 # === BOT LOGIC ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -105,7 +116,7 @@ async def line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📰 Service Messages", callback_data="service_messages")],
         [InlineKeyboardButton("🚉 Departures (by station)", callback_data="departures")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="back_main")],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_main")],
     ]
     await query.edit_message_text(
         f"You selected {line}. What would you like to see?",
@@ -124,13 +135,18 @@ async def show_service_messages(update: Update, context: ContextTypes.DEFAULT_TY
         if not messages:
             await query.edit_message_text(
                 f"No current messages for {line}.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_line")]]),
+                reply_markup=navigation_buttons(),
             )
             return
 
+        await query.message.reply_text(
+            f"📰 <b>Service Messages for {line}</b>\n",
+            parse_mode="HTML",
+            reply_markup=navigation_buttons(),
+        )
+
         for msg in messages:
             title = html.escape(msg.get("title", "No title"))
-            desc = msg.get("description", "")
             pub = msg.get("publication")
             pub_str = (
                 datetime.datetime.fromtimestamp(pub / 1000, datetime.UTC).strftime("%d.%m.%Y %H:%M")
@@ -142,7 +158,7 @@ async def show_service_messages(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text(preview, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
     except Exception as e:
-        await query.message.reply_text(f"Error while loading messages: {e}")
+        await query.message.reply_text(f"Error while loading messages: {e}", reply_markup=navigation_buttons())
 
 
 async def show_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -162,10 +178,9 @@ async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(f"🔍 Searching departures for *{station_name}*...", parse_mode="Markdown")
 
     try:
-        # === 1. Find EVA-ID ===
         station_id = get_station_id(station_name)
         if not station_id:
-            await update.message.reply_text("🚫 Station not found in Deutsche Bahn database.")
+            await update.message.reply_text("🚫 Station not found in Deutsche Bahn database.", reply_markup=navigation_buttons())
             return
 
         now = datetime.datetime.now()
@@ -179,24 +194,17 @@ async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYP
             "DB-Api-Key": API_KEY,
         }
 
-        # === 2. Request Timetable ===
         r = requests.get(url, headers=headers)
         if r.status_code != 200 or not r.text.strip():
-            # fallback to live timetable (fchg)
+            # fallback to live timetable
             url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/fchg/{station_id}"
             r = requests.get(url, headers=headers)
 
         if r.status_code != 200:
-            await update.message.reply_text(f"❌ Error fetching timetable (status {r.status_code}).")
+            await update.message.reply_text(f"❌ Error fetching timetable (status {r.status_code}).", reply_markup=navigation_buttons())
             return
 
-        # === 3. Parse XML ===
-        try:
-            root = ET.fromstring(r.text)
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ Failed to parse XML:\n\n{html.escape(str(e))}")
-            return
-
+        root = ET.fromstring(r.text)
         rows = []
         for s in root.findall("s"):
             tl = s.find("tl")
@@ -214,7 +222,7 @@ async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYP
             rows.append((line_code, time_fmt, destination))
 
         if not rows:
-            await update.message.reply_text("ℹ️ No departures found for this station at the current hour.")
+            await update.message.reply_text("ℹ️ No departures found for this station at the current hour.", reply_markup=navigation_buttons())
             return
 
         rows.sort(key=lambda x: x[1])
@@ -222,10 +230,10 @@ async def handle_station_input(update: Update, context: ContextTypes.DEFAULT_TYP
         for line, time, dest in rows[:10]:
             text += f"• {line} → {dest} at {time}\n"
 
-        await update.message.reply_text(text, parse_mode="HTML")
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=navigation_buttons())
 
     except Exception as e:
-        await update.message.reply_text(f"💥 Unexpected error: {html.escape(str(e))}")
+        await update.message.reply_text(f"💥 Unexpected error: {html.escape(str(e))}", reply_markup=navigation_buttons())
 
 
 async def handle_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,7 +248,7 @@ async def handle_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     desc = msg.get("description", "")
     title = msg.get("title", "No title")
-    await query.message.reply_text(f"<b>{title}</b>\n\n{desc}", parse_mode="HTML")
+    await query.message.reply_text(f"<b>{title}</b>\n\n{desc}", parse_mode="HTML", reply_markup=navigation_buttons())
 
 
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
