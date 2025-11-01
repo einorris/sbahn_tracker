@@ -1,184 +1,171 @@
 import os
 import requests
 import datetime
-from bs4 import BeautifulSoup
+import html
+import xml.etree.ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ContextTypes, filters
 )
 
-# ========== Настройки ==========
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
+# ========== Configuration ==========
+TOKEN = os.getenv("BOT_TOKEN")
+MVG_URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
+DB_CLIENT_ID = os.getenv("DB_CLIENT_ID")
+DB_API_KEY = os.getenv("DB_API_KEY")
 
-# ========== Вспомогательные функции ==========
-def fetch_messages():
-    headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(URL, headers=headers, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+# ========== Utility Functions ==========
+def fetch_mvg():
+    r = requests.get(MVG_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+    r.raise_for_status()
+    return r.json()
 
-def is_active(incident_durations):
-    if not incident_durations:
-        return False
+def is_active(inc):
     now = datetime.datetime.now(datetime.UTC).timestamp() * 1000
-    for d in incident_durations:
-        start = d.get("from")
-        end = d.get("to")
-        if start and end and start <= now <= end:
+    for d in inc or []:
+        if d.get("from") and d.get("to") and d["from"] <= now <= d["to"]:
             return True
     return False
 
-def normalize_label(label):
-    """Нормализует label: убирает пробелы, делает верхний регистр, например 'S 2' -> 'S2'"""
-    if not label:
-        return ""
-    return "".join(label.split()).upper()
+def normalize_label(l): 
+    return "".join((l or "").split()).upper()
 
-def normalize_transport_type(tt):
-    if not tt:
-        return ""
-    return tt.strip().upper()
-
-def filter_sbahn_messages(messages, line_label="S2"):
-    """
-    Фильтрует активные сообщения по линии (например 'S2').
-    Убирает дубликаты по title, оставляет самый свежий (по publication).
-    """
-    want = line_label.replace(" ", "").upper()  # e.g. "S2"
+def filter_mvg(messages, label="S2"):
+    label = normalize_label(label)
     seen = {}
-    for msg in messages:
-        for line in msg.get("lines", []):
-            ttype = normalize_transport_type(line.get("transportType"))
-            label = normalize_label(line.get("label"))
-            # считаем запись относящейся к нужной линии, если transportType указывает на S-Bahn
-            if (ttype in ("SBAHN", "S") ) and label == want:
-                if is_active(msg.get("incidentDurations", [])):
-                    title = (msg.get("title") or "").strip()
-                    pub = msg.get("publication", 0) or 0
-                    # keep most recent by title
-                    if title in seen:
-                        if pub > (seen[title].get("publication") or 0):
-                            seen[title] = msg
-                    else:
-                        seen[title] = msg
-    # sort by publication desc
+    for m in messages:
+        for line in m.get("lines", []):
+            if normalize_label(line.get("label")) == label and line.get("transportType") in ("SBAHN", "S"):
+                if is_active(m.get("incidentDurations", [])):
+                    title = m.get("title", "").strip()
+                    pub = m.get("publication", 0)
+                    if title in seen and pub < seen[title].get("publication", 0):
+                        continue
+                    seen[title] = m
     return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
 
-def html_to_plain_text(html_content):
-    """Безопасно извлекает текст из HTML (удаляет теги)."""
-    if not html_content:
-        return ""
-    text = BeautifulSoup(html_content, "html.parser").get_text(separator="\n")
-    # нормализуем пробелы/пустые строки
-    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-    return text
+def format_mvg(messages, label="S2"):
+    if not messages:
+        return f"✅ No current service messages for {label}."
+    out = [f"<b>🚆 Current service alerts for {label}:</b>\n"]
+    for m in messages:
+        title = html.escape(m.get("title", ""))
+        pub = datetime.datetime.utcfromtimestamp(m["publication"]/1000).strftime("%d.%m.%Y %H:%M")
+        out.append(f"• <b>{title}</b>\n🕓 {pub} UTC\n")
+    return "\n".join(out)
 
-# ========== Форматирование/вывод ==========
-def build_preview_text(msg):
-    title = msg.get("title", "Без заголовка")
-    pub = msg.get("publication")
-    pub_str = datetime.datetime.utcfromtimestamp(pub / 1000).strftime("%d.%m.%Y %H:%M") if pub else "?"
-    return f"🚆 {title}\n🕓 {pub_str} UTC"
+# -------- Deutsche Bahn Timetables ----------
+def get_station_id(station_name):
+    url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
+    h = {"Accept": "application/json","DB-Client-Id": DB_CLIENT_ID,"DB-Api-Key": DB_API_KEY}
+    r = requests.get(url, headers=h, params={"searchstring": station_name})
+    r.raise_for_status()
+    data = r.json().get("result")
+    if not data: return None
+    return data[0]["evaNumbers"][0]["number"], data[0]["name"]
 
-def build_detail_text(msg):
-    title = msg.get("title", "Без заголовка")
-    raw_desc = msg.get("description", "")
-    desc = html_to_plain_text(raw_desc)
-    durations = msg.get("incidentDurations", [])
-    time_str = ""
-    if durations:
-        d = durations[0]
-        start = datetime.datetime.utcfromtimestamp(d.get("from") / 1000).strftime("%d.%m.%Y %H:%M")
-        end = datetime.datetime.utcfromtimestamp(d.get("to") / 1000).strftime("%d.%m.%Y %H:%M")
-        time_str = f"{start} – {end} UTC"
-    full = f"{title}\n\n{desc}\n\n🕓 Valid: {time_str}"
-    # Ограничиваем длину (Telegram limit)
-    if len(full) > 3900:
-        full = full[:3900] + "\n\n...[truncated]"
-    return full
+def get_departures(station_id, line_label):
+    now = datetime.datetime.now()
+    date = now.strftime("%y%m%d")
+    hour = now.strftime("%H")
+    url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{station_id}/{date}/{hour}"
+    h = {"Accept": "application/xml","DB-Client-Id": DB_CLIENT_ID,"DB-Api-Key": DB_API_KEY}
+    r = requests.get(url, headers=h)
+    r.raise_for_status()
+    root = ET.fromstring(r.text)
+    rows=[]
+    for s in root.findall("s"):
+        tl=s.find("tl"); 
+        if not tl: continue
+        if not tl.attrib.get("c","").startswith("S"): continue
+        if normalize_label(tl.attrib.get("c")) != normalize_label(line_label): continue
+        dp=s.find("dp")
+        if not dp: continue
+        raw=dp.attrib.get("pt","")
+        if len(raw)<10: continue
+        time=f"{2000+int(raw[0:2]):04d}-{int(raw[2:4]):02d}-{int(raw[4:6]):02d} {int(raw[6:8]):02d}:{int(raw[8:10]):02d}"
+        path=dp.attrib.get("ppth","")
+        dest=path.split("|")[-1] if path else ""
+        rows.append((time,dest))
+    rows.sort(key=lambda x:x[0])
+    return rows[:10]
 
-# ========== Handlers ==========
+# ========== Telegram Bot Handlers ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(1,5)],
-        [InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(5,9)],
+    kb=[[InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(1,5)],
+        [InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(5,9)]]
+    await update.message.reply_text("🚆 Choose an S-Bahn line:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    _, label=q.data.split("|",1)
+    context.user_data["line"]=label
+    kb=[
+        [InlineKeyboardButton("📢 Service Messages",callback_data=f"MSG|{label}")],
+        [InlineKeyboardButton("🕓 Departures",callback_data=f"DEP|{label}")],
+        [InlineKeyboardButton("⬅ Back to Lines",callback_data="BACK|LINES")]
     ]
-    await update.message.reply_text("Выберите линию S-Bahn:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await q.edit_message_text(f"Line {label} — choose what to view:", reply_markup=InlineKeyboardMarkup(kb))
 
-async def handle_line_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    # callback_data = "LINE|S2" (we use this scheme)
+async def show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    _, label=q.data.split("|",1)
     try:
-        _, line_label = query.data.split("|", 1)
-    except Exception:
-        await query.edit_message_text("Неправильный callback.")
-        return
-
-    try:
-        data = fetch_messages()
-        msgs = filter_sbahn_messages(data, line_label)
+        data=fetch_mvg()
+        msgs=filter_mvg(data,label)
+        text=format_mvg(msgs,label)
     except Exception as e:
-        await query.edit_message_text(f"Ошибка при получении данных: {e}")
-        return
+        text=f"❌ Error loading data: {e}"
+    kb=[[InlineKeyboardButton("⬅ Back", callback_data=f"LINE|{label}")]]
+    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
-    # сохраняем под ключом конкретной линии, чтобы callback 'details' мог достать
-    key = f"msgs_{line_label}"
-    context.user_data[key] = msgs
+async def ask_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    _, label=q.data.split("|",1)
+    context.user_data["line"]=label
+    context.user_data["await_station"]=True
+    kb=[[InlineKeyboardButton("⬅ Back", callback_data=f"LINE|{label}")]]
+    await q.edit_message_text(f"Please enter a station name for {label} (e.g., Erding):", reply_markup=InlineKeyboardMarkup(kb))
 
-    if not msgs:
-        await query.edit_message_text(f"✅ Нет актуальных сообщений для {line_label}.")
-        return
-
-    # отправляем превью для каждого сообщения и кнопку "Details"
-    # используем callback_data: DETAILS|S2|index
-    for i, m in enumerate(msgs):
-        preview = build_preview_text(m)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📄 Details", callback_data=f"DETAILS|{line_label}|{i}")]])
-        # отправляем новым сообщением (не edit), чтобы пользователю было удобнее
-        await query.message.reply_text(preview, reply_markup=kb)
-    # удаляем исходное сообщение с кнопками (чтобы не засорять), можно оставить
+async def handle_station_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("await_station"): return
+    name=update.message.text.strip()
+    label=context.user_data.get("line","S2")
+    context.user_data["await_station"]=False
     try:
-        await query.delete_message()
-    except Exception:
-        pass
+        sid,fullname=get_station_id(name)
+        if not sid:
+            await update.message.reply_text(f"🚫 Station '{name}' not found.")
+            return
+        deps=get_departures(sid,label)
+        if not deps:
+            await update.message.reply_text(f"No departures for {label} at {fullname}.")
+            return
+        out=f"🕓 <b>Next {label} departures from {fullname}</b>\n\n"
+        for t,dest in deps:
+            out+=f"• {t} → {dest}\n"
+        kb=[[InlineKeyboardButton("⬅ Back", callback_data=f"LINE|{label}")]]
+        await update.message.reply_text(out, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
-async def handle_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    # callback_data = "DETAILS|S2|0"
-    try:
-        _, line_label, idx_str = query.data.split("|", 2)
-        idx = int(idx_str)
-    except Exception:
-        await query.edit_message_text("Неправильный callback.")
-        return
+async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    _, target = q.data.split("|",1)
+    if target == "LINES":
+        kb=[[InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(1,5)],
+            [InlineKeyboardButton(f"S{i}", callback_data=f"LINE|S{i}") for i in range(5,9)]]
+        await q.edit_message_text("🚆 Choose an S-Bahn line:", reply_markup=InlineKeyboardMarkup(kb))
 
-    key = f"msgs_{line_label}"
-    msgs = context.user_data.get(key, [])
-    if not msgs or idx < 0 or idx >= len(msgs):
-        await query.edit_message_text("Сообщение не найдено или устарело.")
-        return
-
-    detail_text = build_detail_text(msgs[idx])
-    # редактируем текущее сообщение (можно и отправить новым)
-    try:
-        await query.edit_message_text(detail_text)
-    except Exception:
-        # fallback: отправим как новое сообщение
-        await query.message.reply_text(detail_text)
-
-# ========== Запуск ==========
-if __name__ == "__main__":
-    if not TOKEN:
-        raise SystemExit("Set BOT_TOKEN environment variable")
-    app = ApplicationBuilder().token(TOKEN).build()
+# ========== Run ==========
+if __name__=="__main__":
+    app=ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_line_selection, pattern=r"^LINE\|"))
-    app.add_handler(CallbackQueryHandler(handle_details, pattern=r"^DETAILS\|"))
-    print("Bot started")
+    app.add_handler(CallbackQueryHandler(choose_action, pattern="^LINE\\|"))
+    app.add_handler(CallbackQueryHandler(show_messages, pattern="^MSG\\|"))
+    app.add_handler(CallbackQueryHandler(ask_station, pattern="^DEP\\|"))
+    app.add_handler(CallbackQueryHandler(handle_back, pattern="^BACK\\|"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_station_name))
+    print("✅ Bot is running...")
     app.run_polling()
