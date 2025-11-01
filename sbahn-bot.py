@@ -24,7 +24,7 @@ def fetch_messages():
 def is_active(incident_durations):
     if not incident_durations:
         return False
-    now = datetime.datetime.utcnow().timestamp() * 1000
+    now = datetime.datetime.now(datetime.UTC).timestamp() * 1000
     for d in incident_durations:
         start = d.get("from")
         end = d.get("to")
