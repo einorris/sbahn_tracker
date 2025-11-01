@@ -167,5 +167,5 @@ if __name__=="__main__":
     app.add_handler(CallbackQueryHandler(ask_station, pattern="^DEP\\|"))
     app.add_handler(CallbackQueryHandler(handle_back, pattern="^BACK\\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_station_name))
-    print("✅ Bot is running...")
+    print("✅ Bot is running....")
     app.run_polling()
