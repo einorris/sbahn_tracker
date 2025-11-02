@@ -1,19 +1,139 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-from __future__ import annotations
-import sys
-import argparse
+# sbahn_bot.py
+import os
+import re
+import time
+import unicodedata
+import hashlib
+import html
+import requests
+import datetime
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+from datetime import timezone, timedelta
 from zoneinfo import ZoneInfo
 
-BERLIN = ZoneInfo("Europe/Berlin")
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+from telegram.error import BadRequest
 
-STATION_SYNONYMS = {
-    # Общие правила: Munich -> München; ue/oe/ae -> ü/ö/ä (см. ниже режеx-правило)
-    # Центр / Stammstrecke
+# ================== CONFIG ==================
+BOT_TOKEN   = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
+CLIENT_ID   = os.getenv("DB_CLIENT_ID") or "YOUR_DB_CLIENT_ID"
+API_KEY_DB  = os.getenv("DB_API_KEY")  or "YOUR_DB_API_KEY"
+DEEPL_AUTH_KEY = os.getenv("DEEPL_AUTH_KEY")  # xxxxxxxx:fx
+
+MVG_URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
+DB_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
+
+HTTP_TIMEOUT = 5  # сек
+HTTP_RETRIES = 2   # доп. попытки (итого 1+2)
+
+# Short, safe callback keys
+CB_LANG_PREFIX   = "LANG:"    # LANG:de / LANG:en / LANG:uk
+CB_LINE_PREFIX   = "L:"       # e.g. L:S2
+CB_ACT_MSG       = "A:MSG"
+CB_ACT_DEP       = "A:DEP"
+CB_BACK_MAIN     = "B:MAIN"
+CB_DETAIL_PREFIX = "D:"
+
+SUPPORTED_LANGS = ["de", "en", "uk"]  # Deutsch, English, Українська
+
+# ================== TRANSLATION (DeepL) ==================
+DEEPL_URL = "https://api-free.deepl.com/v2/translate"
+
+def _deepl_supported_target(lang_code: str) -> str:
+    return {"de": "DE", "en": "EN", "uk": "UK"}.get(lang_code, "EN")
+
+def deepl_translate(text: str, target_lang: str, is_html: bool) -> str:
+    if not text or not DEEPL_AUTH_KEY:
+        return text
+    try:
+        data = {"text": text, "target_lang": target_lang}
+        if is_html:
+            data["tag_handling"] = "html"
+        r = requests.post(
+            DEEPL_URL,
+            data=data,
+            headers={"Authorization": f"DeepL-Auth-Key {DEEPL_AUTH_KEY}"},
+            timeout=HTTP_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()["translations"][0]["text"]
+    except Exception:
+        return text
+
+def get_user_lang(context) -> str:
+    return context.user_data.get("lang", "en")
+
+def TR_UI(context, text_en: str, is_html: bool=False) -> str:
+    lang = get_user_lang(context)
+    if lang == "en":
+        return text_en
+    return deepl_translate(text_en, _deepl_supported_target(lang), is_html)
+
+def TR_MSG(context, text_de: str, is_html: bool=False) -> str:
+    lang = get_user_lang(context)
+    if lang == "de":
+        return text_de
+    return deepl_translate(text_de, _deepl_supported_target(lang), is_html)
+
+# ================== MVG HELPERS ==================
+def fetch_messages():
+    for attempt in range(HTTP_RETRIES + 1):
+        try:
+            resp = requests.get(MVG_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=HTTP_TIMEOUT)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            if attempt == HTTP_RETRIES:
+                raise
+            time.sleep(0.3 * (2**attempt))
+
+def is_active(incident_durations):
+    if not incident_durations:
+        return False
+    now_ms = datetime.datetime.now(timezone.utc).timestamp() * 1000
+    for d in incident_durations:
+        start = d.get("from"); end = d.get("to")
+        if start and end and start <= now_ms <= end:
+            return True
+    return False
+
+def filter_line_messages(messages, line_label):
+    seen = {}
+    for msg in messages:
+        for line in msg.get("lines", []):
+            if (line.get("transportType") in ("SBAHN", "S")) and (line.get("label") == line_label):
+                if is_active(msg.get("incidentDurations", [])):
+                    title = (msg.get("title") or "").strip()
+                    pub = msg.get("publication", 0)
+                    if title in seen:
+                        if pub > seen[title].get("publication", 0):
+                            seen[title] = msg
+                    else:
+                        seen[title] = msg
+    return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
+
+# ================== STATION SEARCH ==================
+def _norm(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _apply_aliases(q: str) -> str:
+    qn = _norm(q)
+    aliases = {
     "munich hbf": "München Hbf",
     "munich hauptbahnhof": "München Hbf",
     "muenchen hbf": "München Hbf",
@@ -87,272 +207,613 @@ STATION_SYNONYMS = {
     "heimstetten": "Heimstetten",
     "daglfing": "München-Daglfing",
     "englschalking": "München-Englschalking",
-    "rietmoos": "Riemerling",  # иногда ошибочно так пишут — мапим на ближайшее частое
-}
+    "rietmoos": "Riemerling", 
+    }
+    return aliases.get(qn, q)
 
+def _station_search(query: str):
+    url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
+    headers = {
+        "Accept": "application/json",
+        "DB-Client-Id": CLIENT_ID,
+        "DB-Api-Key": API_KEY_DB,
+    }
+    for attempt in range(HTTP_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, params={"searchstring": query}, timeout=HTTP_TIMEOUT)
+            if r.status_code != 200:
+                return []
+            return r.json().get("result", []) or []
+        except Exception:
+            if attempt == HTTP_RETRIES:
+                return []
+            time.sleep(0.3 * (2**attempt))
 
-EVA_BY_NAME = {
-    "München Ost": "8000262",
-}
+def _pick_best_station(results, query_norm: str):
+    best = None; best_score = -1
+    for s in results:
+        if not s.get("evaNumbers"): continue
+        name = s.get("name", ""); nn = _norm(name)
+        score = 0
+        if nn == query_norm: score += 100
+        if nn.startswith(query_norm) or query_norm.startswith(nn): score += 50
+        if query_norm in nn: score += 25
+        if s.get("federalStateCode") == "DE-BY": score += 5
+        if score > best_score:
+            best = s; best_score = score
+    return best
 
+def get_station_id_and_name(station_query: str) -> Tuple[Optional[int], Optional[str]]:
+    primary = _apply_aliases(station_query)
+    qn = _norm(primary)
+
+    results = _station_search(primary)
+    best = _pick_best_station(results, qn)
+    if best:
+        eva = best["evaNumbers"][0]["number"]
+        return eva, best.get("name") or station_query
+
+    wildcard = f"*{station_query}*"
+    results = _station_search(wildcard)
+    best = _pick_best_station(results, _norm(station_query))
+    if best:
+        eva = best["evaNumbers"][0]["number"]
+        return eva, best.get("name") or station_query
+
+    for variant in (f"München*{station_query}*", f"Muenchen*{station_query}*"):
+        results = _station_search(variant)
+        best = _pick_best_station(results, _norm(variant.replace("*"," ")))
+        if best:
+            eva = best["evaNumbers"][0]["number"]
+            return eva, best.get("name") or station_query
+
+    return None, None
+
+# ================== DB PLAN/FCHG MODELS ==================
 @dataclass
-class EventTime:
-    when: datetime | None
-    source: str  # "ct", "pt", "pt+delay"
-    cancelled: bool
-    delay_min: int
+class Event:
+    id: str
+    line_label: str               # e.g. S2 / ICE / etc
+    pt: Optional[datetime.datetime] = None   # planned time
+    ct: Optional[datetime.datetime] = None   # changed time
+    pp: Optional[str] = None      # planned platform
+    cp: Optional[str] = None      # changed platform
+    dest: Optional[str] = None    # terminal station
+    canceled: bool = False
+    raw_tl: Dict[str, str] = field(default_factory=dict)
+    raw_node_attrs: Dict[str, str] = field(default_factory=dict)
 
-@dataclass
-class Departure:
-    sid: str
-    when: datetime
-    line: str | None
-    cat: str | None   # S, RE, RB, ICE, RJ, etc (из <tl c="..."> или l="")
-    number: str | None
-    platform: str | None
-    destination: str | None
-    operator: str | None
-    cancelled: bool
-    delay_min: int
+    def effective_time(self) -> Optional[datetime.datetime]:
+        return self.ct or self.pt
 
-def parse_tt(ts: str) -> datetime | None:
-    """
-    Конвертирует формат DB '2511021336' -> 2025-11-02 13:36 Europe/Berlin.
-    Формат: yymmddHHMM, где yy '00'..'99' => 2000..2099.
-    """
-    if not ts or len(ts) != 10 or not ts.isdigit():
+    def delay_minutes(self) -> Optional[int]:
+        if self.pt and self.ct:
+            delta = int((self.ct - self.pt).total_seconds() // 60)
+            return delta if delta != 0 else None
         return None
-    year = 2000 + int(ts[:2])
-    month = int(ts[2:4])
-    day = int(ts[4:6])
-    hour = int(ts[6:8])
-    minute = int(ts[8:10])
+
+# ---------- cache for /plan ----------
+# key: (eva, yyyymmdd, HH) -> (expires_ts, List[Event])
+PLAN_CACHE: Dict[Tuple[int,str,str], Tuple[float,List[Event]]] = {}
+
+def _requests_get(url: str, headers: dict) -> Optional[str]:
+    for attempt in range(HTTP_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+            if r.status_code != 200:
+                return None
+            return r.text
+        except Exception:
+            if attempt == HTTP_RETRIES:
+                return None
+            time.sleep(0.3 * (2**attempt))
+
+def _parse_time(code: Optional[str], tz: ZoneInfo) -> Optional[datetime.datetime]:
+    if not code or len(code) < 10:
+        return None
     try:
-        return datetime(year, month, day, hour, minute, tzinfo=BERLIN)
-    except ValueError:
+        yy = int(code[0:2]); mm = int(code[2:4]); dd = int(code[4:6])
+        HH = int(code[6:8]);  MM = int(code[8:10])
+        return datetime.datetime(2000+yy, mm, dd, HH, MM, tzinfo=tz)
+    except Exception:
         return None
 
-def best_time(node: ET.Element | None) -> EventTime:
+def _line_from_nodes(tl: Optional[ET.Element], dp_or_ar: ET.Element) -> str:
+    """Return normalized line label:
+       - prefer dp/ar attribute 'l' (already 'S2' or just '2')
+       - fallback to <tl c=... n=...>
     """
-    Возвращает лучшее доступное время для ar/dp:
-    - если есть атрибут ct -> его;
-    - иначе pt + возможная задержка из <m t="d" c="...">;
-    - отмена: есть ли <m t="f"> внутри.
-    """
-    if node is None:
-        return EventTime(None, "missing", False, 0)
+    l_attr = (dp_or_ar.attrib.get("l") or "").strip()
+    if l_attr:
+        up = l_attr.upper()
+        # already like "S2", "S3E"
+        if up.startswith("S"):
+            return up
+        # digits or digits+suffix -> prefix S
+        if re.match(r"^\d+[A-Z]?$", up):
+            return f"S{up}"
+        # anything else -> still prefix S to be safe
+        return f"S{up}"
 
-    ct = node.get("ct")
-    pt = node.get("pt")
-    cancelled = any(m.get("t") == "f" for m in node.findall("./m"))
-    delay_msgs = [m for m in node.findall("./m") if m.get("t") == "d" and m.get("c") and m.get("c").isdigit()]
-    delay_min = max((int(m.get("c")) for m in delay_msgs), default=0)
+    # fallback via <tl>
+    if tl is not None:
+        c = (tl.attrib.get("c") or "").upper()   # category: S, ICE, RE, ...
+        n = (tl.attrib.get("n") or "").strip()
+        if c == "S":
+            # if tl has a number, use it
+            n_clean = re.sub(r"[^0-9A-Z]", "", n).upper()
+            if n_clean:
+                # if n already starts with S (rare), avoid double S
+                return n_clean if n_clean.startswith("S") else f"S{n_clean}"
+            return "S"
+        if c and n:
+            return f"{c} {n}"
+        if c:
+            return c
 
-    if ct:
-        return EventTime(parse_tt(ct), "ct", cancelled, delay_min)
+    return "S"
 
-    when = parse_tt(pt) if pt else None
-    if when and delay_min:
-        when = when + timedelta(minutes=delay_min)
-        return EventTime(when, "pt+delay", cancelled, delay_min)
 
-    return EventTime(when, "pt" if pt else "missing", cancelled, delay_min)
-
-def normalize_station(name: str | None) -> str | None:
-    if not name:
+def _dest_from_path(path: Optional[str]) -> Optional[str]:
+    if not path:
         return None
-    key = name.strip().lower().replace("  ", " ")
-    return STATION_SYNONYMS.get(key, name)
-
-def extract_destination(ppth: str | None) -> str | None:
-    if not ppth:
-        return None
-    # Последний пункт в списке — предполагаем пункт назначения
-    parts = [p.strip() for p in ppth.split("|") if p.strip()]
+    parts = path.split("|")
     return parts[-1] if parts else None
 
-def parse_base(xml_text: str) -> dict[str, dict]:
-    """
-    Парсим базовое расписание <timetable station='...'>.
-    Возвращает словарь по s/@id.
-    """
-    root = ET.fromstring(xml_text)
-    out = {}
-    station = normalize_station(root.get("station"))
-    eva = root.get("eva") or EVA_BY_NAME.get(station or "", None)
+def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
+    key = (eva, date, hour)
+    now = time.time()
+    cached = PLAN_CACHE.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
 
-    for s in root.findall("./s"):
-        sid = s.get("id")
+    headers = {"Accept": "application/xml","DB-Client-Id": CLIENT_ID,"DB-Api-Key": API_KEY_DB}
+    url = f"{DB_BASE}/plan/{eva}/{date}/{hour}"
+    xml_text = _requests_get(url, headers)
+    events: List[Event] = []
+    if not xml_text:
+        PLAN_CACHE[key] = (now + 60, events)
+        return events
+
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:
+        PLAN_CACHE[key] = (now + 60, events)
+        return events
+
+    for s in root.findall("s"):
+        sid = s.attrib.get("id")
         if not sid:
             continue
-
-        tl = s.find("./tl")
-        dp = s.find("./dp")
-
-        line = (dp.get("l") if dp is not None and dp.get("l") else (tl.get("n") if tl is not None else None))
-        cat = tl.get("c") if tl is not None else (dp.get("l") if dp is not None else None)
-        number = tl.get("n") if tl is not None else None
-        operator = tl.get("c") if tl is not None else None
-
-        dp_time = best_time(dp)
-        platform = dp.get("pp") if dp is not None else None
-        dest = extract_destination(dp.get("ppth") if dp is not None else None)
-
-        out[sid] = dict(
-            sid=sid,
-            dp_node=dp,            # для дообогащения
-            dp=dp_time,
-            line=line,
-            cat=cat,
-            number=number,
-            platform=platform,
-            destination=dest,
-            operator=operator,
-            station=station,
-            eva=eva,
-        )
-    return out
-
-def merge_changes(base: dict[str, dict], changes_xml: str) -> dict[str, dict]:
-    """
-    Сшиваем по s/@id. Из изменений берём:
-    - dp.ct как основное время;
-    - отмены и задержки из <m>;
-    - platform (если в changes появится pp — у DB иногда это другой атрибут cp/pp нет, поэтому оставляем базовый pp).
-    Также принимаем линию/категорию l, если в базе её не было.
-    """
-    root = ET.fromstring(changes_xml)
-    # Фильтруем по EVA станции, если можем (для Ostbahnhof это 8000262)
-    target_eva = None
-    # если в базе все записи одной станции — возьмём её EVA
-    for v in base.values():
-        if v.get("eva"):
-            target_eva = v["eva"]
-            break
-
-    for s in root.findall("./s"):
-        if target_eva and s.get("eva") and s.get("eva") != target_eva:
+        tl = s.find("tl")
+        # ✅ Только S-Bahn
+        if tl is None or (tl.attrib.get("c") or "").upper() != "S":
             continue
 
-        sid = s.get("id")
-        if not sid or sid not in base:
-            # Иногда в changes есть записи, которых нет в базовом — можно добавить как новые отправления
-            # но безопаснее пропустить, чтобы не огрести дубликаты разных источников
-            continue
-
-        dp = s.find("./dp")
+        dp = s.find("dp")
         if dp is None:
+            continue  # только отправления
+
+        pt = _parse_time(dp.attrib.get("pt"), tz)
+        pp = dp.attrib.get("pp")
+        dest = _dest_from_path(dp.attrib.get("ppth"))
+        line = _line_from_nodes(tl, dp)
+
+        events.append(Event(
+            id=sid,
+            line_label=line,
+            pt=pt,
+            pp=pp,
+            dest=dest,
+            raw_tl = tl.attrib if tl is not None else {},
+            raw_node_attrs = dict(dp.attrib),
+        ))
+
+    PLAN_CACHE[key] = (now + 90, events)
+    return events
+
+
+def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
+    headers = {"Accept": "application/xml","DB-Client-Id": CLIENT_ID,"DB-Api-Key": API_KEY_DB}
+    url = f"{DB_BASE}/fchg/{eva}"
+    xml_text = _requests_get(url, headers)
+    changes: Dict[str, Event] = {}
+    if not xml_text:
+        return changes
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:
+        return changes
+
+    for s in root.findall("s"):
+        sid = s.attrib.get("id")
+        if not sid:
+            continue
+        tl = s.find("tl")
+        # ✅ Только S-Bahn
+        if tl is None or (tl.attrib.get("c") or "").upper() != "S":
             continue
 
-        # Обновим время/отмену/задержку
-        dp_time = best_time(dp)
-        if dp_time.when is not None:
-            base[sid]["dp"] = dp_time
+        dp = s.find("dp")
+        if dp is None:
+            continue  # только отправления
 
-        # Линия/категория из changes
-        if dp.get("l"):
-            base[sid]["line"] = base[sid]["line"] or dp.get("l")
+        ct = _parse_time(dp.attrib.get("ct"), tz)
+        cp = dp.attrib.get("cp")
+        canceled = False
+        cflag = dp.attrib.get("c") or dp.attrib.get("cn") or ""
+        if str(cflag).lower() in ("1","y","true","c","x"):
+            canceled = True
 
-        # Инкрементальная платформа: в changes почти всегда нет pp; оставим базовую
-        # Но если вдруг появится атрибут pp — используем его.
-        if dp.get("pp"):
-            base[sid]["platform"] = dp.get("pp")
+        pt = _parse_time(dp.attrib.get("pt"), tz)
+        pp = dp.attrib.get("pp")
+        dest = _dest_from_path(dp.attrib.get("cpth") or dp.attrib.get("ppth"))
+        line = _line_from_nodes(tl, dp)
 
-        # Обновим назначение, если есть ppth
-        if dp.get("ppth"):
-            base[sid]["destination"] = extract_destination(dp.get("ppth"))
+        changes[sid] = Event(
+            id=sid,
+            line_label=line,
+            pt=pt,
+            ct=ct,
+            pp=pp,
+            cp=cp,
+            dest=dest,
+            canceled=canceled,
+            raw_tl = tl.attrib if tl is not None else {},
+            raw_node_attrs = dict(dp.attrib),
+        )
 
-        # Если есть tl в changes (редко) — обновим cat/number/operator
-        tl = s.find("./tl")
-        if tl is not None:
-            base[sid]["cat"] = tl.get("c") or base[sid]["cat"]
-            base[sid]["number"] = tl.get("n") or base[sid]["number"]
-            base[sid]["operator"] = tl.get("c") or base[sid]["operator"]
+    return changes
 
-    return base
 
-def collect_departures(merged: dict[str, dict], now: datetime, horizon_min: int = 60) -> list[Departure]:
-    out: list[Departure] = []
-    for v in merged.values():
-        et: EventTime = v["dp"]
-        if et.when is None:
+def merge_plan_with_changes(plan: List[Event], changes: Dict[str, Event]) -> List[Event]:
+    """Apply fchg over plan. Add ad-hoc from fchg if missing in plan."""
+    by_id: Dict[str, Event] = {e.id: e for e in plan}
+    # Apply changes
+    for sid, ch in changes.items():
+        if sid in by_id:
+            base = by_id[sid]
+            # Line can change (rare) — prefer change's line if present
+            if ch.line_label: base.line_label = ch.line_label
+            # Time/platform overrides
+            if ch.ct: base.ct = ch.ct
+            if ch.cp: base.cp = ch.cp
+            if ch.pt and not base.pt: base.pt = ch.pt
+            if ch.pp and not base.pp: base.pp = ch.pp
+            # Destination/path might change
+            if ch.dest: base.dest = ch.dest
+            # Cancellation
+            base.canceled = base.canceled or ch.canceled
+            # Keep attrs (for debugging)
+            base.raw_tl.update(ch.raw_tl)
+            base.raw_node_attrs.update(ch.raw_node_attrs)
+        else:
+            # Ad-hoc departure — include as is
+            by_id[sid] = ch
+    return list(by_id.values())
+
+# ================== SERVICE: get_departures(eva) ==================
+def get_departures_window(
+    eva: int,
+    now_local: datetime.datetime,
+    max_items: int = 15,
+    selected_line: Optional[str] = None
+) -> Tuple[List[Event], bool]:
+    """
+    Returns (events, live_ok)
+    - events: 0..15 merged and filtered departures within [now-5m, now+60m]
+    - live_ok: whether fchg endpoint succeeded
+    """
+    tz = ZoneInfo("Europe/Berlin")
+    now_local = now_local.astimezone(tz)
+    prev = now_local - timedelta(minutes=5)
+    horizon = now_local + timedelta(minutes=60)
+
+    # determine two hours: current and next (handle wrap at 23->00 next day)
+    d1 = now_local.strftime("%y%m%d")
+    h1 = now_local.strftime("%H")
+    dt2 = now_local + timedelta(hours=1)
+    d2 = dt2.strftime("%y%m%d")
+    h2 = dt2.strftime("%H")
+
+    # fetch plan for both hours (cached)
+    plan1 = fetch_plan(eva, d1, h1, tz)
+    plan2 = fetch_plan(eva, d2, h2, tz)
+    plan_all = {e.id: e for e in (plan1 + plan2)}  # dedupe by id
+    plan_list = list(plan_all.values())
+
+    # fetch live changes
+    live_ok = True
+    try:
+        changes = fetch_fchg(eva, tz)
+    except Exception:
+        changes = {}
+        live_ok = False
+
+    merged = merge_plan_with_changes(plan_list, changes)
+
+    # optional filter by selected S-line, e.g. "S2"
+    if selected_line:
+        sel = selected_line.upper().strip()
+        merged = [e for e in merged if (e.line_label or "").upper().startswith(sel)]
+
+
+    # filter window + only departures
+    def in_window(ev: Event) -> bool:
+        t = ev.effective_time() or ev.pt
+        if not t:
+            return False
+        return (prev <= t <= horizon)
+
+    filtered = [e for e in merged if in_window(e)]
+    # sort by effective time (ct if exists, else pt)
+    filtered.sort(key=lambda e: e.effective_time() or e.pt)
+    return filtered[:max_items], live_ok
+
+# ================== UI HELPERS ==================
+def nav_menu(context):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(TR_UI(context, "📰 Show Messages"),   callback_data=CB_ACT_MSG),
+            InlineKeyboardButton(TR_UI(context, "🚉 Show Departures"), callback_data=CB_ACT_DEP),
+        ],
+        [InlineKeyboardButton(TR_UI(context, "🆕 Change Line"), callback_data=CB_BACK_MAIN)]
+    ])
+
+def line_picker_markup():
+    rows = [
+        [InlineKeyboardButton(f"S{i}", callback_data=f"{CB_LINE_PREFIX}S{i}") for i in range(1,5)],
+        [InlineKeyboardButton(f"S{i}", callback_data=f"{CB_LINE_PREFIX}S{i}") for i in range(5,9)],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def lang_picker_markup():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Deutsch",      callback_data=f"{CB_LANG_PREFIX}de"),
+            InlineKeyboardButton("English",      callback_data=f"{CB_LANG_PREFIX}en"),
+            InlineKeyboardButton("Українська",   callback_data=f"{CB_LANG_PREFIX}uk"),
+        ]
+    ])
+
+async def safe_send_html(message_func, text_html: str):
+    try:
+        return await message_func(text_html, parse_mode="HTML", disable_web_page_preview=True)
+    except BadRequest:
+        txt = text_html
+        txt = re.sub(r"(?is)<\s*br\b[^>]*>", "\n", txt)
+        txt = re.sub(r"(?is)</\s*p\s*>", "\n\n", txt)
+        txt = re.sub(r"(?is)<[^>]+>", "", txt)
+        txt = html.unescape(txt)
+        return await message_func(txt, disable_web_page_preview=True)
+
+def short_id_for_message(msg):
+    basis = f"{msg.get('id','')}-{msg.get('title','')}-{msg.get('publication','')}"
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+
+# ================== BOT HANDLERS (Messages — без изменений) ==================
+def fetch_line_messages_safe(line: str):
+    data = fetch_messages()
+    return filter_line_messages(data, line)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("Choose language / Sprache wählen / Оберіть мову:", reply_markup=lang_picker_markup())
+
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cur = get_user_lang(context)
+    key_state = "OK" if DEEPL_AUTH_KEY else "MISSING"
+    await update.message.reply_text(
+        f"Language: {cur}\nDeepL key: {key_state}\n\nChoose language / Sprache wählen / Оберіть мову:",
+        reply_markup=lang_picker_markup()
+    )
+
+async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    lang = q.data.replace(CB_LANG_PREFIX, "")
+    if lang not in SUPPORTED_LANGS:
+        lang = "en"
+    context.user_data["lang"] = lang
+
+    await q.edit_message_text(TR_UI(context, "🚆 Choose an S-Bahn line:"))
+    await q.message.reply_text(TR_UI(context, "Tip: You can change language anytime with /lang"))
+    await q.message.reply_text(TR_UI(context, "Lines:"), reply_markup=line_picker_markup())
+
+async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    line = q.data.replace(CB_LINE_PREFIX, "")
+    context.user_data["line"] = line
+    await q.edit_message_text(TR_UI(context, f"You selected {line}. Choose an action:"))
+    await q.message.reply_text(
+        TR_UI(context, "Actions:"),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(TR_UI(context, "📰 Service Messages"), callback_data=CB_ACT_MSG)],
+            [InlineKeyboardButton(TR_UI(context, "🚉 Departures (by station)"), callback_data=CB_ACT_DEP)],
+            [InlineKeyboardButton(TR_UI(context, "⬅️ Back to Main Menu"), callback_data=CB_BACK_MAIN)],
+        ])
+    )
+
+async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    line = context.user_data.get("line", "S2")
+
+    try:
+        msgs = fetch_line_messages_safe(line)
+        context.user_data["msg_map"] = {}
+
+        if not msgs:
+            await q.message.reply_text(TR_UI(context, f"No current messages for {line}."))
+            await q.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+            return
+
+        await q.message.reply_text(TR_UI(context, f"📰 Service Messages for {line}"), parse_mode="HTML")
+
+        for m in msgs:
+            mid = short_id_for_message(m)
+            context.user_data["msg_map"][mid] = m
+
+            title_de = m.get("title", "Ohne Titel")
+            pub      = m.get("publication")
+            pub_s    = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
+
+            title_shown = TR_MSG(context, title_de, is_html=True)
+
+            text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "🔍 Details"), callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
+            await q.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+        await q.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+
+    except Exception as e:
+        await q.message.reply_text(TR_UI(context, f"⚠️ Error: {html.escape(str(e))}"))
+        await q.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+
+async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    mid = q.data.replace(CB_DETAIL_PREFIX, "")
+    m = (context.user_data.get("msg_map") or {}).get(mid)
+    if not m:
+        await q.message.reply_text(TR_UI(context, "Message details not found."))
+        await q.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+        return
+
+    title_de = m.get("title", "Ohne Titel")
+    desc_de  = m.get("description", "") or ""
+    pub      = m.get("publication")
+    pub_s    = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
+
+    title_out = TR_MSG(context, title_de, is_html=True)
+    desc_out  = TR_MSG(context, desc_de, is_html=True)
+
+    text_html = f"📢 <b>{html.escape(title_out)}</b>\n🕓 {pub_s} UTC\n\n{desc_out}"
+    await safe_send_html(q.message.reply_text, text_html)
+    await q.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+
+# ================== NEW: DEPARTURES (PLAN ⊕ FCHG) ==================
+async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["await_station"] = True
+    await q.edit_message_text(TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"))
+
+async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("await_station"):
+        return
+    context.user_data["await_station"] = False
+
+    station_in = update.message.text.strip()
+    await update.message.reply_text(TR_UI(context, f"🔍 Searching departures for {station_in}..."))
+
+    eva, station_name = get_station_id_and_name(station_in)
+    if not eva:
+        await update.message.reply_text(TR_UI(context, "🚫 Station not found in Deutsche Bahn database."), reply_markup=nav_menu(context))
+        return
+
+    now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
+    try:
+        selected_line = context.user_data.get("line")  # например, "S2"
+        events, live_ok = get_departures_window(eva, now_local, max_items=15, selected_line=selected_line)
+
+    except Exception as e:
+        await update.message.reply_text(TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"), reply_markup=nav_menu(context))
+        return
+
+    if selected_line:
+        header = TR_UI(context, f"🚉 Departures from {station_name} — {selected_line}")
+    else:
+        header = TR_UI(context, f"🚉 Departures from {station_name}")
+    
+    out_lines: List[str] = []
+    at_txt      = TR_UI(context, " at ")
+    platform    = TR_UI(context, "Platform")
+    canceled_t  = TR_UI(context, "Fällt aus")  # German word is common UX in DE; stays as-is in DE, translated otherwise
+    delay_sfx   = TR_UI(context, " min")
+    arrow       = " → "
+
+    for ev in events:
+        t = ev.effective_time() or ev.pt
+        if not t:
             continue
-        if et.cancelled:
-            # Показываем отменённые только если они попадают в окно — можно исключать, решай сам
-            pass
+        hhmm = t.strftime("%H:%M")
 
-        # фильтр по окну
-        if now <= et.when <= (now + timedelta(minutes=horizon_min)):
-            out.append(
-                Departure(
-                    sid=v["sid"],
-                    when=et.when,
-                    line=v.get("line"),
-                    cat=v.get("cat"),
-                    number=v.get("number"),
-                    platform=v.get("platform"),
-                    destination=v.get("destination"),
-                    operator=v.get("operator"),
-                    cancelled=et.cancelled,
-                    delay_min=et.delay_min,
-                )
-            )
-    out.sort(key=lambda d: d.when)
-    return out
+        # platform text
+        gleis_txt = ""
+        p_old = ev.pp or ""
+        p_new = ev.cp or ""
+        if p_new and p_old and p_new != p_old:
+            # Platform change Gleis X → Y
+            gleis_txt = f", {platform} {p_old} → {p_new}"
+        elif p_new:
+            gleis_txt = f", {platform} {p_new}"
+        elif p_old:
+            gleis_txt = f", {platform} {p_old}"
 
-def format_row(d: Departure) -> str:
-    t = d.when.strftime("%H:%M")
-    line = d.line or "-"
-    cat = (d.cat or "").upper()
-    num = d.number or ""
-    label = f"{cat}{(' ' + num) if num else ''}".strip()
-    plat = f"Gl. {d.platform}" if d.platform else ""
-    dest = d.destination or ""
-    flags = []
-    if d.cancelled:
-        flags.append("🚫 отменён")
-    elif d.delay_min:
-        flags.append(f"+{d.delay_min}′")
-    flags_s = ("  •  " + " / ".join(flags)) if flags else ""
-    return f"{t}  {line:<4}  {label:<8}  {dest:<30}  {plat}{flags_s}  (id {d.sid})"
+        # delay text
+        delay_txt = ""
+        dm = ev.delay_minutes()
+        if dm is not None and dm != 0:
+            sign = "+" if dm > 0 else ""  # обычно показывают +N
+            delay_txt = f", {sign}{dm}{delay_sfx}"
 
-def main():
-    parser = argparse.ArgumentParser(description="Next departures merger (München Ost fix).")
-    parser.add_argument("--base-xml", required=True, help="Путь к базовому timetable XML (как у тебя).")
-    parser.add_argument("--changes-xml", required=True, help="Путь к XML «known changes».")
-    parser.add_argument("--station", default="Ostbahnhof", help="Имя станции/синоним (по умолчанию Ostbahnhof).")
-    parser.add_argument("--horizon", type=int, default=60, help="Окно в минутах для ближайших отправлений.")
-    args = parser.parse_args()
+        # canceled
+        cancel_txt = f", {canceled_t}" if ev.canceled else ""
 
-    # читаем файлы
-    base_xml = open(args.base_xml, "r", encoding="utf-8").read()
-    changes_xml = open(args.changes_xml, "r", encoding="utf-8").read()
+        dest = ev.dest or "—"
+        line_label = ev.line_label or "S"
 
-    # нормализуем станцию и вычислим EVA, если потребуется
-    norm_station = normalize_station(args.station)
-    eva = EVA_BY_NAME.get(norm_station or "", None)
+        out_lines.append(f"{line_label}{arrow}{dest}{at_txt}{hhmm}{gleis_txt}{delay_txt}{cancel_txt}")
 
-    # парсим
-    base = parse_base(base_xml)
-    merged = merge_changes(base, changes_xml)
+    if not out_lines:
+        warn = TR_UI(context, "ℹ️ No departures in the next 60 minutes.")
+        await update.message.reply_text(warn, reply_markup=nav_menu(context))
+        return
 
-    now = datetime.now(tz=BERLIN)
-    deps = collect_departures(merged, now, args.horizon)
+    body = "\n".join(out_lines)
+    footer = ""
+    if not live_ok:
+        footer = "\n\n" + TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
 
-    if not deps:
-        print(f"Нет отправлений в ближайшие {args.horizon} минут для станции {norm_station or args.station}.")
-        # подсказка по отладке: выведем пару ближайших независимо от окна
-        all_deps = collect_departures(merged, now - timedelta(hours=1), 6*60)
-        if all_deps:
-            print("\nБлижайшие в целом (6 часов):")
-            for d in all_deps[:10]:
-                print("  " + format_row(d))
-        sys.exit(0)
+    # Сначала заголовок жирным, потом тело plain (чтобы не сломать спецсимволы)
+    await safe_send_html(update.message.reply_text, f"<b>{html.escape(header)}</b>")
+    await update.message.reply_text(body + footer)
+    await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
-    print(f"Станция: {norm_station or args.station}  (EVA: {eva or '—'})  Сейчас: {now.strftime('%H:%M')}")
-    print(f"Ближайшие отправления (до +{args.horizon}′):\n")
-    for d in deps:
-        print(format_row(d))
+# ----- Back / Change line -----
+async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    lang = get_user_lang(context)
+    context.user_data.clear()
+    context.user_data["lang"] = lang
+    await q.edit_message_text(TR_UI(context, "🚆 Choose an S-Bahn line:"), reply_markup=line_picker_markup())
 
+# ================== WIRING ==================
 if __name__ == "__main__":
-    main()
+    print("🚀 Bot starting (polling)...")
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("lang",  cmd_lang))
+
+    # Language picker
+    app.add_handler(CallbackQueryHandler(on_language,            pattern=r"^LANG:"))
+
+    # Line & actions
+    app.add_handler(CallbackQueryHandler(on_line_selected,       pattern=r"^L:"))
+    app.add_handler(CallbackQueryHandler(on_show_messages,       pattern=r"^A:MSG$"))
+    app.add_handler(CallbackQueryHandler(on_departures_prompt,   pattern=r"^A:DEP$"))
+    app.add_handler(CallbackQueryHandler(on_back_main,           pattern=r"^B:MAIN$"))
+
+    # Details
+    app.add_handler(CallbackQueryHandler(on_details,             pattern=r"^D:"))
+
+    # Free text for station input
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
+
+    print("✅ Bot started (polling).")
+    app.run_polling()
