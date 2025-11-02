@@ -1,12 +1,15 @@
 # sbahn_bot.py
 import os
 import re
+import time
 import unicodedata
 import hashlib
 import html
 import requests
 import datetime
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 from datetime import timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -26,11 +29,13 @@ from telegram.error import BadRequest
 BOT_TOKEN   = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
 CLIENT_ID   = os.getenv("DB_CLIENT_ID") or "YOUR_DB_CLIENT_ID"
 API_KEY_DB  = os.getenv("DB_API_KEY")  or "YOUR_DB_API_KEY"
-
-# DeepL API Free key: looks like "xxxxxxxx:fx"
-DEEPL_AUTH_KEY = os.getenv("DEEPL_AUTH_KEY")
+DEEPL_AUTH_KEY = os.getenv("DEEPL_AUTH_KEY")  # xxxxxxxx:fx
 
 MVG_URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
+DB_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
+
+HTTP_TIMEOUT = 5  # сек
+HTTP_RETRIES = 2   # доп. попытки (итого 1+2)
 
 # Short, safe callback keys
 CB_LANG_PREFIX   = "LANG:"    # LANG:de / LANG:en / LANG:uk
@@ -49,9 +54,7 @@ def _deepl_supported_target(lang_code: str) -> str:
     return {"de": "DE", "en": "EN", "uk": "UK"}.get(lang_code, "EN")
 
 def deepl_translate(text: str, target_lang: str, is_html: bool) -> str:
-    if not text:
-        return text
-    if not DEEPL_AUTH_KEY:
+    if not text or not DEEPL_AUTH_KEY:
         return text
     try:
         data = {"text": text, "target_lang": target_lang}
@@ -61,7 +64,7 @@ def deepl_translate(text: str, target_lang: str, is_html: bool) -> str:
             DEEPL_URL,
             data=data,
             headers={"Authorization": f"DeepL-Auth-Key {DEEPL_AUTH_KEY}"},
-            timeout=12,
+            timeout=HTTP_TIMEOUT,
         )
         r.raise_for_status()
         return r.json()["translations"][0]["text"]
@@ -75,21 +78,25 @@ def TR_UI(context, text_en: str, is_html: bool=False) -> str:
     lang = get_user_lang(context)
     if lang == "en":
         return text_en
-    target = _deepl_supported_target(lang)
-    return deepl_translate(text_en, target, is_html)
+    return deepl_translate(text_en, _deepl_supported_target(lang), is_html)
 
 def TR_MSG(context, text_de: str, is_html: bool=False) -> str:
     lang = get_user_lang(context)
     if lang == "de":
         return text_de
-    target = _deepl_supported_target(lang)
-    return deepl_translate(text_de, target, is_html)
+    return deepl_translate(text_de, _deepl_supported_target(lang), is_html)
 
 # ================== MVG HELPERS ==================
 def fetch_messages():
-    resp = requests.get(MVG_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+    for attempt in range(HTTP_RETRIES + 1):
+        try:
+            resp = requests.get(MVG_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=HTTP_TIMEOUT)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            if attempt == HTTP_RETRIES:
+                raise
+            time.sleep(0.3 * (2**attempt))
 
 def is_active(incident_durations):
     if not incident_durations:
@@ -143,10 +150,16 @@ def _station_search(query: str):
         "DB-Client-Id": CLIENT_ID,
         "DB-Api-Key": API_KEY_DB,
     }
-    r = requests.get(url, headers=headers, params={"searchstring": query}, timeout=12)
-    if r.status_code != 200:
-        return []
-    return r.json().get("result", []) or []
+    for attempt in range(HTTP_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, params={"searchstring": query}, timeout=HTTP_TIMEOUT)
+            if r.status_code != 200:
+                return []
+            return r.json().get("result", []) or []
+        except Exception:
+            if attempt == HTTP_RETRIES:
+                return []
+            time.sleep(0.3 * (2**attempt))
 
 def _pick_best_station(results, query_norm: str):
     best = None; best_score = -1
@@ -162,7 +175,7 @@ def _pick_best_station(results, query_norm: str):
             best = s; best_score = score
     return best
 
-def get_station_id_and_name(station_query: str):
+def get_station_id_and_name(station_query: str) -> Tuple[Optional[int], Optional[str]]:
     primary = _apply_aliases(station_query)
     qn = _norm(primary)
 
@@ -188,18 +201,255 @@ def get_station_id_and_name(station_query: str):
 
     return None, None
 
-# ================== TIME / PARSE ==================
-def parse_db_time_to_aware_dt(code: str, tz: ZoneInfo):
+# ================== DB PLAN/FCHG MODELS ==================
+@dataclass
+class Event:
+    id: str
+    line_label: str               # e.g. S2 / ICE / etc
+    pt: Optional[datetime.datetime] = None   # planned time
+    ct: Optional[datetime.datetime] = None   # changed time
+    pp: Optional[str] = None      # planned platform
+    cp: Optional[str] = None      # changed platform
+    dest: Optional[str] = None    # terminal station
+    canceled: bool = False
+    raw_tl: Dict[str, str] = field(default_factory=dict)
+    raw_node_attrs: Dict[str, str] = field(default_factory=dict)
+
+    def effective_time(self) -> Optional[datetime.datetime]:
+        return self.ct or self.pt
+
+    def delay_minutes(self) -> Optional[int]:
+        if self.pt and self.ct:
+            delta = int((self.ct - self.pt).total_seconds() // 60)
+            return delta if delta != 0 else None
+        return None
+
+# ---------- cache for /plan ----------
+# key: (eva, yyyymmdd, HH) -> (expires_ts, List[Event])
+PLAN_CACHE: Dict[Tuple[int,str,str], Tuple[float,List[Event]]] = {}
+
+def _requests_get(url: str, headers: dict) -> Optional[str]:
+    for attempt in range(HTTP_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+            if r.status_code != 200:
+                return None
+            return r.text
+        except Exception:
+            if attempt == HTTP_RETRIES:
+                return None
+            time.sleep(0.3 * (2**attempt))
+
+def _parse_time(code: Optional[str], tz: ZoneInfo) -> Optional[datetime.datetime]:
+    if not code or len(code) < 10:
+        return None
     try:
         yy = int(code[0:2]); mm = int(code[2:4]); dd = int(code[4:6])
         HH = int(code[6:8]);  MM = int(code[8:10])
-        return datetime.datetime(2000 + yy, mm, dd, HH, MM, tzinfo=tz)
+        return datetime.datetime(2000+yy, mm, dd, HH, MM, tzinfo=tz)
     except Exception:
         return None
 
-def short_id_for_message(msg):
-    basis = f"{msg.get('id','')}-{msg.get('title','')}-{msg.get('publication','')}"
-    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+def _line_from_nodes(tl: Optional[ET.Element], dp_or_ar: ET.Element) -> str:
+    # For S-Bahn, dp/ar attribute 'l' is the line number (e.g., "2") → "S2"
+    l_attr = dp_or_ar.attrib.get("l")
+    if l_attr:
+        return f"S{l_attr}"
+    # Fallback: build from tl (category+number) if available
+    if tl is not None:
+        c = tl.attrib.get("c")  # category letter, e.g. "S", "ICE"
+        n = tl.attrib.get("n")  # sometimes train no
+        if c and n:
+            # If c="S" and n looks like line → keep "S" (but n isn't line usually)
+            return c if c == "S" else f"{c} {n}"
+        if c:
+            return c
+    # ultimate fallback
+    return "S"
+
+def _dest_from_path(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    parts = path.split("|")
+    return parts[-1] if parts else None
+
+def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
+    """Parse /plan events (departures only). Cached ~90s."""
+    key = (eva, date, hour)
+    now = time.time()
+    cached = PLAN_CACHE.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    headers = {"Accept": "application/xml","DB-Client-Id": CLIENT_ID,"DB-Api-Key": API_KEY_DB}
+    url = f"{DB_BASE}/plan/{eva}/{date}/{hour}"
+    xml_text = _requests_get(url, headers)
+    events: List[Event] = []
+    if not xml_text:
+        PLAN_CACHE[key] = (now + 60, events)
+        return events
+
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:
+        PLAN_CACHE[key] = (now + 60, events)
+        return events
+
+    for s in root.findall("s"):
+        sid = s.attrib.get("id")
+        if not sid:
+            continue
+        tl = s.find("tl")
+        dp = s.find("dp")
+        if dp is None:
+            continue  # only departures
+        pt = _parse_time(dp.attrib.get("pt"), tz)
+        pp = dp.attrib.get("pp")
+        dest = _dest_from_path(dp.attrib.get("ppth"))
+        line = _line_from_nodes(tl, dp)
+
+        ev = Event(
+            id=sid,
+            line_label=line,
+            pt=pt,
+            pp=pp,
+            dest=dest,
+            raw_tl = tl.attrib if tl is not None else {},
+            raw_node_attrs = dict(dp.attrib),
+        )
+        events.append(ev)
+
+    PLAN_CACHE[key] = (now + 90, events)
+    return events
+
+def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
+    """Parse /fchg changes into a dict by id. Include ad-hoc departures too."""
+    headers = {"Accept": "application/xml","DB-Client-Id": CLIENT_ID,"DB-Api-Key": API_KEY_DB}
+    url = f"{DB_BASE}/fchg/{eva}"
+    xml_text = _requests_get(url, headers)
+    changes: Dict[str, Event] = {}
+    if not xml_text:
+        return changes
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:
+        return changes
+
+    for s in root.findall("s"):
+        sid = s.attrib.get("id")
+        if not sid:
+            continue
+        tl = s.find("tl")
+        dp = s.find("dp")
+        if dp is None:
+            continue  # only departures
+
+        # Changed values (if present)
+        ct = _parse_time(dp.attrib.get("ct"), tz)
+        cp = dp.attrib.get("cp")
+        # cancellation markers (DB uses different flags; catch common ones):
+        canceled = False
+        # 'c' sometimes = '1' or 'c' for cancellation, also 'cn' may appear
+        cflag = dp.attrib.get("c") or dp.attrib.get("cn") or ""
+        if str(cflag).lower() in ("1","y","true","c","x"):
+            canceled = True
+
+        # keep planned as fallback if present in change doc
+        pt = _parse_time(dp.attrib.get("pt"), tz)
+        pp = dp.attrib.get("pp")
+
+        # destination: changed path 'cpth' preferred, else planned 'ppth'
+        dest = _dest_from_path(dp.attrib.get("cpth") or dp.attrib.get("ppth"))
+        line = _line_from_nodes(tl, dp)
+
+        ev = Event(
+            id=sid,
+            line_label=line,
+            pt=pt,  # plan time can exist in fchg payload too
+            ct=ct,
+            pp=pp,
+            cp=cp,
+            dest=dest,
+            canceled=canceled,
+            raw_tl = tl.attrib if tl is not None else {},
+            raw_node_attrs = dict(dp.attrib),
+        )
+        changes[sid] = ev
+
+    return changes
+
+def merge_plan_with_changes(plan: List[Event], changes: Dict[str, Event]) -> List[Event]:
+    """Apply fchg over plan. Add ad-hoc from fchg if missing in plan."""
+    by_id: Dict[str, Event] = {e.id: e for e in plan}
+    # Apply changes
+    for sid, ch in changes.items():
+        if sid in by_id:
+            base = by_id[sid]
+            # Line can change (rare) — prefer change's line if present
+            if ch.line_label: base.line_label = ch.line_label
+            # Time/platform overrides
+            if ch.ct: base.ct = ch.ct
+            if ch.cp: base.cp = ch.cp
+            if ch.pt and not base.pt: base.pt = ch.pt
+            if ch.pp and not base.pp: base.pp = ch.pp
+            # Destination/path might change
+            if ch.dest: base.dest = ch.dest
+            # Cancellation
+            base.canceled = base.canceled or ch.canceled
+            # Keep attrs (for debugging)
+            base.raw_tl.update(ch.raw_tl)
+            base.raw_node_attrs.update(ch.raw_node_attrs)
+        else:
+            # Ad-hoc departure — include as is
+            by_id[sid] = ch
+    return list(by_id.values())
+
+# ================== SERVICE: get_departures(eva) ==================
+def get_departures_window(eva: int, now_local: datetime.datetime, max_items: int = 15) -> Tuple[List[Event], bool]:
+    """
+    Returns (events, live_ok)
+    - events: 0..15 merged and filtered departures within [now-5m, now+60m]
+    - live_ok: whether fchg endpoint succeeded
+    """
+    tz = ZoneInfo("Europe/Berlin")
+    now_local = now_local.astimezone(tz)
+    prev = now_local - timedelta(minutes=5)
+    horizon = now_local + timedelta(minutes=60)
+
+    # determine two hours: current and next (handle wrap at 23->00 next day)
+    d1 = now_local.strftime("%y%m%d")
+    h1 = now_local.strftime("%H")
+    dt2 = now_local + timedelta(hours=1)
+    d2 = dt2.strftime("%y%m%d")
+    h2 = dt2.strftime("%H")
+
+    # fetch plan for both hours (cached)
+    plan1 = fetch_plan(eva, d1, h1, tz)
+    plan2 = fetch_plan(eva, d2, h2, tz)
+    plan_all = {e.id: e for e in (plan1 + plan2)}  # dedupe by id
+    plan_list = list(plan_all.values())
+
+    # fetch live changes
+    live_ok = True
+    try:
+        changes = fetch_fchg(eva, tz)
+    except Exception:
+        changes = {}
+        live_ok = False
+
+    merged = merge_plan_with_changes(plan_list, changes)
+
+    # filter window + only departures
+    def in_window(ev: Event) -> bool:
+        t = ev.effective_time() or ev.pt
+        if not t:
+            return False
+        return (prev <= t <= horizon)
+
+    filtered = [e for e in merged if in_window(e)]
+    # sort by effective time (ct if exists, else pt)
+    filtered.sort(key=lambda e: e.effective_time() or e.pt)
+    return filtered[:max_items], live_ok
 
 # ================== UI HELPERS ==================
 def nav_menu(context):
@@ -238,7 +488,15 @@ async def safe_send_html(message_func, text_html: str):
         txt = html.unescape(txt)
         return await message_func(txt, disable_web_page_preview=True)
 
-# ================== BOT HANDLERS ==================
+def short_id_for_message(msg):
+    basis = f"{msg.get('id','')}-{msg.get('title','')}-{msg.get('publication','')}"
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+
+# ================== BOT HANDLERS (Messages — без изменений) ==================
+def fetch_line_messages_safe(line: str):
+    data = fetch_messages()
+    return filter_line_messages(data, line)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Choose language / Sprache wählen / Оберіть мову:", reply_markup=lang_picker_markup())
@@ -278,15 +536,13 @@ async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-# ----- Messages -----
 async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     line = context.user_data.get("line", "S2")
 
     try:
-        data = fetch_messages()
-        msgs = filter_line_messages(data, line)
+        msgs = fetch_line_messages_safe(line)
         context.user_data["msg_map"] = {}
 
         if not msgs:
@@ -338,7 +594,7 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_send_html(q.message.reply_text, text_html)
     await q.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
-# ----- Departures -----
+# ================== NEW: DEPARTURES (PLAN ⊕ FCHG) ==================
 async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -358,68 +614,67 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(TR_UI(context, "🚫 Station not found in Deutsche Bahn database."), reply_markup=nav_menu(context))
         return
 
-    tz = ZoneInfo("Europe/Berlin")
-    now_local = datetime.datetime.now(tz)
-    horizon   = now_local + timedelta(hours=1)
-
-    date = now_local.strftime("%y%m%d")
-    hour = now_local.strftime("%H")
-    headers = {"Accept":"application/xml","DB-Client-Id":CLIENT_ID,"DB-Api-Key":API_KEY_DB}
-
-    def fetch_xml(url):
-        r = requests.get(url, headers=headers, timeout=12)
-        if r.status_code != 200 or not r.text.strip():
-            return None
-        try:
-            return ET.fromstring(r.text)
-        except Exception:
-            return None
-
-    root = fetch_xml(f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{eva}/{date}/{hour}")
-    if root is None:
-        root = fetch_xml(f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/fchg/{eva}")
-
-    rows = []
-    if root is not None:
-        for s in root.findall("s"):
-            tl = s.find("tl")
-            if tl is None:
-                continue
-            # 'c' у tl почти всегда "S" — это класс, не номер линии
-            dp = s.find("dp")
-            if dp is None:
-                continue
-            code = dp.attrib.get("pt", "")
-            dt   = parse_db_time_to_aware_dt(code, tz)
-            if not dt:
-                continue
-            if not (now_local <= dt <= horizon):
-                continue
-            path = dp.attrib.get("ppth", "")
-            dest = path.split("|")[-1] if path else "Unknown"
-
-            # 🔧 ВАЖНО: номер линии из атрибута 'l' у dp → "S2", "S3", ...
-            l_attr = dp.attrib.get("l")
-            if l_attr:
-                line_label = f"S{l_attr}"
-            else:
-                # fallback: если вдруг нет 'l', возьмем 'c' из tl (даст "S")
-                line_label = (tl.attrib.get("c") or "S")
-
-            rows.append((line_label, dt, dest))
-
-    if not rows:
-        await update.message.reply_text(TR_UI(context, "ℹ️ No departures in the next 60 minutes."), reply_markup=nav_menu(context))
+    now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
+    try:
+        events, live_ok = get_departures_window(eva, now_local, max_items=15)
+    except Exception as e:
+        await update.message.reply_text(TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"), reply_markup=nav_menu(context))
         return
 
-    rows.sort(key=lambda x: x[1])
     header = TR_UI(context, f"🚉 Departures from {station_name}")
-    out_html = f"<b>{html.escape(header)}</b>\n\n"
-    at_txt = TR_UI(context, " at ")
-    for line_label, dt, dest in rows[:12]:
-        out_html += f"{html.escape(line_label)} → {html.escape(dest)}{at_txt}{dt.strftime('%H:%M')}\n"
+    out_lines: List[str] = []
+    at_txt      = TR_UI(context, " at ")
+    platform    = TR_UI(context, "Platform")
+    canceled_t  = TR_UI(context, "Fällt aus")  # German word is common UX in DE; stays as-is in DE, translated otherwise
+    delay_sfx   = TR_UI(context, " min")
+    arrow       = " → "
 
-    await safe_send_html(update.message.reply_text, out_html)
+    for ev in events:
+        t = ev.effective_time() or ev.pt
+        if not t:
+            continue
+        hhmm = t.strftime("%H:%M")
+
+        # platform text
+        gleis_txt = ""
+        p_old = ev.pp or ""
+        p_new = ev.cp or ""
+        if p_new and p_old and p_new != p_old:
+            # Platform change Gleis X → Y
+            gleis_txt = f", {platform} {p_old} → {p_new}"
+        elif p_new:
+            gleis_txt = f", {platform} {p_new}"
+        elif p_old:
+            gleis_txt = f", {platform} {p_old}"
+
+        # delay text
+        delay_txt = ""
+        dm = ev.delay_minutes()
+        if dm is not None and dm != 0:
+            sign = "+" if dm > 0 else ""  # обычно показывают +N
+            delay_txt = f", {sign}{dm}{delay_sfx}"
+
+        # canceled
+        cancel_txt = f", {canceled_t}" if ev.canceled else ""
+
+        dest = ev.dest or "—"
+        line_label = ev.line_label or "S"
+
+        out_lines.append(f"{line_label}{arrow}{dest}{at_txt}{hhmm}{gleis_txt}{delay_txt}{cancel_txt}")
+
+    if not out_lines:
+        warn = TR_UI(context, "ℹ️ No departures in the next 60 minutes.")
+        await update.message.reply_text(warn, reply_markup=nav_menu(context))
+        return
+
+    body = "\n".join(out_lines)
+    footer = ""
+    if not live_ok:
+        footer = "\n\n" + TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
+
+    # Сначала заголовок жирным, потом тело plain (чтобы не сломать спецсимволы)
+    await safe_send_html(update.message.reply_text, f"<b>{html.escape(header)}</b>")
+    await update.message.reply_text(body + footer)
     await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
 # ----- Back / Change line -----
