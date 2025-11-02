@@ -134,12 +134,84 @@ def _norm(s: str) -> str:
 def _apply_aliases(q: str) -> str:
     qn = _norm(q)
     aliases = {
-        "ostbahnhof": "muenchen ost",
-        "muenchen ostbahnhof": "muenchen ost",
-        "hauptbahnhof": "muenchen hbf",
-        "muenchen hauptbahnhof": "muenchen hbf",
-        "munich east": "muenchen ost",
-        "munich main": "muenchen hbf",
+     
+    # Общие правила: Munich -> München; ue/oe/ae -> ü/ö/ä (см. ниже режеx-правило)
+    # Центр / Stammstrecke
+    "munich hbf": "München Hbf",
+    "munich hauptbahnhof": "München Hbf",
+    "muenchen hbf": "München Hbf",
+    "muenchen hauptbahnhof": "München Hbf",
+    "münchen hauptbahnhof": "München Hbf",
+    "hbf tief": "München Hbf",  # иногда прилетает как «Hbf (tief)»
+    "hauptbahnhof": "München Hbf",
+
+    "marienplatz": "München Marienplatz",
+    "marienplatz (tief)": "München Marienplatz",
+
+    "karlsplatz": "München Karlsplatz (Stachus)",
+    "stachus": "München Karlsplatz (Stachus)",
+    "karlsplatz (stachus)": "München Karlsplatz (Stachus)",
+
+    "isartor": "München Isartor",
+    "rosenheimer platz": "München Rosenheimer Platz",
+    "hackerbrücke": "München Hackerbrücke",
+    "hackerbruecke": "München Hackerbrücke",
+    "donnersbergerbruecke": "München Donnersbergerbrücke",
+    "donnersbergerbrücke": "München Donnersbergerbrücke",
+    "laim": "München Laim",
+    "pasing": "München-Pasing",
+    "muenchen pasing": "München-Pasing",
+    "münchen pasing": "München-Pasing",
+
+    # Восток
+    "ostbahnhof": "München Ost",
+    "munich east": "München Ost",
+    "muenchen ostbahnhof": "München Ost",
+    "münchen ostbahnhof": "München Ost",
+    "leuchtenbergring": "München Leuchtenbergring",
+    "berg am laim": "München-Berg am Laim",
+    "trudering": "München-Trudering",
+    "riem": "München-Riem",
+
+    # Юг/юго-восток (S3/S7/S20)
+    "gising": "München Giesing",   # частая опечатка
+    "giesing": "München Giesing",
+    "harras": "München Harras",
+    "mittersendling": "Mittersendling",
+    "siemenswerke": "Siemenswerke",
+    "solln": "München Solln",
+    "fasangarten": "Fasangarten",
+    "neuperlach süd": "Neuperlach Süd",
+    "neuperlach sud": "Neuperlach Süd",
+
+    # Север/северо-восток (S1/S8/S3)
+    "feldmoching": "München-Feldmoching",
+    "moosach": "München-Moosach",
+    "oberwiesenfeld": "Oberwiesenfeld",  # иногда лезет из U-Bahn — игнорируй при желании
+    "unterföhring": "Unterföhring",
+    "unterfoehring": "Unterföhring",
+    "ismaning": "Ismaning",
+
+    # Аэропорт
+    "munich airport": "München Flughafen Terminal",
+    "muc": "München Flughafen Terminal",
+    "flughafen münchen": "München Flughafen Terminal",
+    "flughafen muenchen": "München Flughafen Terminal",
+    "munich international airport": "München Flughafen Terminal",
+    "visitor park": "München Flughafen Besucherpark",
+    "besucherpark": "München Flughafen Besucherpark",
+
+    # Восточная дуга S2 до Эрдинга
+    "erding": "Erding",
+    "altenerding": "Altenerding",
+    "aufhausen (oberbay)": "Aufhausen (Oberbay)",
+    "markt schwaben": "Markt Schwaben",
+    "grub (oberbay)": "Grub (Oberbay)",
+    "heimstetten": "Heimstetten",
+    "daglfing": "München-Daglfing",
+    "englschalking": "München-Englschalking",
+    "rietmoos": "Riemerling",  # иногда ошибочно так пишут — мапим на ближайшее частое
+
     }
     return aliases.get(qn, q)
 
