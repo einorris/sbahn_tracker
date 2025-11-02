@@ -293,7 +293,6 @@ def _dest_from_path(path: Optional[str]) -> Optional[str]:
     return parts[-1] if parts else None
 
 def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
-    """Parse /plan events (departures only). Cached ~90s."""
     key = (eva, date, hour)
     now = time.time()
     cached = PLAN_CACHE.get(key)
@@ -319,15 +318,20 @@ def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
         if not sid:
             continue
         tl = s.find("tl")
+        # ✅ Только S-Bahn
+        if tl is None or (tl.attrib.get("c") or "").upper() != "S":
+            continue
+
         dp = s.find("dp")
         if dp is None:
-            continue  # only departures
+            continue  # только отправления
+
         pt = _parse_time(dp.attrib.get("pt"), tz)
         pp = dp.attrib.get("pp")
         dest = _dest_from_path(dp.attrib.get("ppth"))
         line = _line_from_nodes(tl, dp)
 
-        ev = Event(
+        events.append(Event(
             id=sid,
             line_label=line,
             pt=pt,
@@ -335,14 +339,13 @@ def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
             dest=dest,
             raw_tl = tl.attrib if tl is not None else {},
             raw_node_attrs = dict(dp.attrib),
-        )
-        events.append(ev)
+        ))
 
     PLAN_CACHE[key] = (now + 90, events)
     return events
 
+
 def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
-    """Parse /fchg changes into a dict by id. Include ad-hoc departures too."""
     headers = {"Accept": "application/xml","DB-Client-Id": CLIENT_ID,"DB-Api-Key": API_KEY_DB}
     url = f"{DB_BASE}/fchg/{eva}"
     xml_text = _requests_get(url, headers)
@@ -359,32 +362,30 @@ def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
         if not sid:
             continue
         tl = s.find("tl")
+        # ✅ Только S-Bahn
+        if tl is None or (tl.attrib.get("c") or "").upper() != "S":
+            continue
+
         dp = s.find("dp")
         if dp is None:
-            continue  # only departures
+            continue  # только отправления
 
-        # Changed values (if present)
         ct = _parse_time(dp.attrib.get("ct"), tz)
         cp = dp.attrib.get("cp")
-        # cancellation markers (DB uses different flags; catch common ones):
         canceled = False
-        # 'c' sometimes = '1' or 'c' for cancellation, also 'cn' may appear
         cflag = dp.attrib.get("c") or dp.attrib.get("cn") or ""
         if str(cflag).lower() in ("1","y","true","c","x"):
             canceled = True
 
-        # keep planned as fallback if present in change doc
         pt = _parse_time(dp.attrib.get("pt"), tz)
         pp = dp.attrib.get("pp")
-
-        # destination: changed path 'cpth' preferred, else planned 'ppth'
         dest = _dest_from_path(dp.attrib.get("cpth") or dp.attrib.get("ppth"))
         line = _line_from_nodes(tl, dp)
 
-        ev = Event(
+        changes[sid] = Event(
             id=sid,
             line_label=line,
-            pt=pt,  # plan time can exist in fchg payload too
+            pt=pt,
             ct=ct,
             pp=pp,
             cp=cp,
@@ -393,9 +394,9 @@ def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
             raw_tl = tl.attrib if tl is not None else {},
             raw_node_attrs = dict(dp.attrib),
         )
-        changes[sid] = ev
 
     return changes
+
 
 def merge_plan_with_changes(plan: List[Event], changes: Dict[str, Event]) -> List[Event]:
     """Apply fchg over plan. Add ad-hoc from fchg if missing in plan."""
@@ -424,7 +425,12 @@ def merge_plan_with_changes(plan: List[Event], changes: Dict[str, Event]) -> Lis
     return list(by_id.values())
 
 # ================== SERVICE: get_departures(eva) ==================
-def get_departures_window(eva: int, now_local: datetime.datetime, max_items: int = 15) -> Tuple[List[Event], bool]:
+def get_departures_window(
+    eva: int,
+    now_local: datetime.datetime,
+    max_items: int = 15,
+    selected_line: Optional[str] = None
+) -> Tuple[List[Event], bool]:
     """
     Returns (events, live_ok)
     - events: 0..15 merged and filtered departures within [now-5m, now+60m]
@@ -457,6 +463,12 @@ def get_departures_window(eva: int, now_local: datetime.datetime, max_items: int
         live_ok = False
 
     merged = merge_plan_with_changes(plan_list, changes)
+
+    # optional filter by selected S-line, e.g. "S2"
+    if selected_line:
+        sel = selected_line.upper().strip()
+        merged = [e for e in merged if (e.line_label or "").upper().startswith(sel)]
+
 
     # filter window + only departures
     def in_window(ev: Event) -> bool:
@@ -635,12 +647,18 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     try:
-        events, live_ok = get_departures_window(eva, now_local, max_items=15)
+        selected_line = context.user_data.get("line")  # например, "S2"
+        events, live_ok = get_departures_window(eva, now_local, max_items=15, selected_line=selected_line)
+
     except Exception as e:
         await update.message.reply_text(TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"), reply_markup=nav_menu(context))
         return
 
-    header = TR_UI(context, f"🚉 Departures from {station_name}")
+    if selected_line:
+        header = TR_UI(context, f"🚉 Departures from {station_name} — {selected_line}")
+    else:
+        header = TR_UI(context, f"🚉 Departures from {station_name}")
+    
     out_lines: List[str] = []
     at_txt      = TR_UI(context, " at ")
     platform    = TR_UI(context, "Platform")
