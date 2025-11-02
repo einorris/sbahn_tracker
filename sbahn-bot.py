@@ -286,7 +286,7 @@ async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     q = update.callback_query
     await q.answer()
     context.user_data["await_station"] = True
-    await q.edit_message_text("Please enter the station name (e.g., *Erding* or *Ostbahnhof*):", parse_mode="Markdown")
+    await q.edit_message_text("Please enter the station name (e.g., *Erding*, *Hbf* or *Ost*):", parse_mode="Markdown")
 
 async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("await_station"):
