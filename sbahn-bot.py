@@ -630,7 +630,7 @@ async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         TR_UI(context, "Actions:"),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(TR_UI(context, "📰 Service Messages"), callback_data=CB_ACT_MSG)],
-            [InlineKeyboardButton(TR_UI(context, "🚉 Departures (by station)"), callback_data=CB_ACT_DEP)],
+            [InlineKeyboardButton(TR_UI(context, "🚉 Train departures (by station)"), callback_data=CB_ACT_DEP)],
             [InlineKeyboardButton(TR_UI(context, "⬅️ Back to Main Menu"), callback_data=CB_BACK_MAIN)],
         ])
     )
@@ -768,7 +768,7 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         out_lines.append(f"{line_label}{arrow}{dest}{at_txt}{hhmm}{gleis_txt}{delay_txt}{cancel_txt}")
 
     if not out_lines:
-        warn = TR_UI(context, "ℹ️ No departures in the next 60 minutes.")
+        warn = TR_UI(context, "ℹ️ No train departures in the next 60 minutes.")
         await update.message.reply_text(warn, reply_markup=nav_menu(context))
         return
 
