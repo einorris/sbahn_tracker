@@ -180,6 +180,7 @@ def _apply_aliases(q: str) -> str:
     "fasangarten": "Fasangarten",
     "neuperlach süd": "Neuperlach Süd",
     "neuperlach sud": "Neuperlach Süd",
+    "ebersberg" : "Ebersberg (Oberbay)",
 
     # Север/северо-восток (S1/S8/S3)
     "feldmoching": "München-Feldmoching",
@@ -554,8 +555,8 @@ def get_departures_window(
 def nav_menu(context):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(TR_UI(context, "📰 Show Service Messages"),   callback_data=CB_ACT_MSG),
-            InlineKeyboardButton(TR_UI(context, "🚉 Show Train departures"), callback_data=CB_ACT_DEP),
+            InlineKeyboardButton(TR_UI(context, "📰 Service Messages"),   callback_data=CB_ACT_MSG),
+            InlineKeyboardButton(TR_UI(context, "🚉 Train departures"), callback_data=CB_ACT_DEP),
         ],
         [InlineKeyboardButton(TR_UI(context, "🆕 Change Line"), callback_data=CB_BACK_MAIN)]
     ])
