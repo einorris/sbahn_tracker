@@ -45,21 +45,16 @@ SUPPORTED_LANGS = ["de", "en", "uk"]  # Deutsch, English, Українська
 # ================== TRANSLATION (DeepL) ==================
 DEEPL_URL = "https://api-free.deepl.com/v2/translate"
 
+def _deepl_supported_target(lang_code: str) -> str:
+    return {"de": "DE", "en": "EN", "uk": "UK"}.get(lang_code, "EN")
+
 def deepl_translate(text: str, target_lang: str, is_html: bool) -> str:
-    """
-    Translate with DeepL (Free).
-    target_lang: 'DE', 'EN', 'UK'
-    is_html: True -> let DeepL handle tags safely
-    """
     if not text:
         return text
     if not DEEPL_AUTH_KEY:
-        return text  # fail-open: no translation key
+        return text
     try:
-        data = {
-            "text": text,
-            "target_lang": target_lang.upper(),  # DeepL expects 'DE', 'EN', 'UK'
-        }
+        data = {"text": text, "target_lang": target_lang}
         if is_html:
             data["tag_handling"] = "html"
         r = requests.post(
@@ -74,31 +69,20 @@ def deepl_translate(text: str, target_lang: str, is_html: bool) -> str:
         return text
 
 def get_user_lang(context) -> str:
-    """Return 'de'|'en'|'uk'; default 'en'."""
     return context.user_data.get("lang", "en")
 
 def TR_UI(context, text_en: str, is_html: bool=False) -> str:
-    """
-    Translate UI strings that we define на английском → to selected lang via DeepL.
-    If lang == 'en' or no key -> return English.
-    """
     lang = get_user_lang(context)
-    if lang == "en" or not DEEPL_AUTH_KEY:
+    if lang == "en":
         return text_en
-    # Map to DeepL codes
-    target = {"de": "DE", "en": "EN", "uk": "UK"}[lang]
+    target = _deepl_supported_target(lang)
     return deepl_translate(text_en, target, is_html)
 
 def TR_MSG(context, text_de: str, is_html: bool=False) -> str:
-    """
-    Translate MVG messages (German original) → to user lang.
-    If lang == 'de' -> return as-is (per your requirement).
-    For 'en' or 'uk' -> translate DE → target.
-    """
     lang = get_user_lang(context)
-    if lang == "de" or not DEEPL_AUTH_KEY:
+    if lang == "de":
         return text_de
-    target = {"de": "DE", "en": "EN", "uk": "UK"}[lang]
+    target = _deepl_supported_target(lang)
     return deepl_translate(text_de, target, is_html)
 
 # ================== MVG HELPERS ==================
@@ -118,7 +102,6 @@ def is_active(incident_durations):
     return False
 
 def filter_line_messages(messages, line_label):
-    """Active messages for a given S-Bahn line; keep newest per title."""
     seen = {}
     for msg in messages:
         for line in msg.get("lines", []):
@@ -180,24 +163,15 @@ def _pick_best_station(results, query_norm: str):
     return best
 
 def get_station_id_and_name(station_query: str):
-    """
-    Return (eva_id, display_name) or (None, None).
-    Steps:
-      1) aliases → exact/contains
-      2) "*{query}*"
-      3) "München*{query}*" and "Muenchen*{query}*"
-    """
     primary = _apply_aliases(station_query)
     qn = _norm(primary)
 
-    # 1) primary
     results = _station_search(primary)
     best = _pick_best_station(results, qn)
     if best:
         eva = best["evaNumbers"][0]["number"]
         return eva, best.get("name") or station_query
 
-    # 2) wildcard *{query}*
     wildcard = f"*{station_query}*"
     results = _station_search(wildcard)
     best = _pick_best_station(results, _norm(station_query))
@@ -205,7 +179,6 @@ def get_station_id_and_name(station_query: str):
         eva = best["evaNumbers"][0]["number"]
         return eva, best.get("name") or station_query
 
-    # 3) München*/Muenchen*
     for variant in (f"München*{station_query}*", f"Muenchen*{station_query}*"):
         results = _station_search(variant)
         best = _pick_best_station(results, _norm(variant.replace("*"," ")))
@@ -217,7 +190,6 @@ def get_station_id_and_name(station_query: str):
 
 # ================== TIME / PARSE ==================
 def parse_db_time_to_aware_dt(code: str, tz: ZoneInfo):
-    """DB 'yymmddHHMM' -> aware datetime (Europe/Berlin)."""
     try:
         yy = int(code[0:2]); mm = int(code[2:4]); dd = int(code[4:6])
         HH = int(code[6:8]);  MM = int(code[8:10])
@@ -255,7 +227,6 @@ def lang_picker_markup():
         ]
     ])
 
-# --- safe HTML sender (async) ---
 async def safe_send_html(message_func, text_html: str):
     try:
         return await message_func(text_html, parse_mode="HTML", disable_web_page_preview=True)
@@ -269,9 +240,16 @@ async def safe_send_html(message_func, text_html: str):
 
 # ================== BOT HANDLERS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Language selection first
     context.user_data.clear()
     await update.message.reply_text("Choose language / Sprache wählen / Оберіть мову:", reply_markup=lang_picker_markup())
+
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cur = get_user_lang(context)
+    key_state = "OK" if DEEPL_AUTH_KEY else "MISSING"
+    await update.message.reply_text(
+        f"Language: {cur}\nDeepL key: {key_state}\n\nChoose language / Sprache wählen / Оберіть мову:",
+        reply_markup=lang_picker_markup()
+    )
 
 async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -284,9 +262,6 @@ async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(TR_UI(context, "🚆 Choose an S-Bahn line:"))
     await q.message.reply_text(TR_UI(context, "Tip: You can change language anytime with /lang"))
     await q.message.reply_text(TR_UI(context, "Lines:"), reply_markup=line_picker_markup())
-
-async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Choose language / Sprache wählen / Оберіть мову:", reply_markup=lang_picker_markup())
 
 async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -325,12 +300,10 @@ async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mid = short_id_for_message(m)
             context.user_data["msg_map"][mid] = m
 
-            # MVG fields (German)
             title_de = m.get("title", "Ohne Titel")
             pub      = m.get("publication")
             pub_s    = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
-            # Translate title for UI language (if not DE)
             title_shown = TR_MSG(context, title_de, is_html=True)
 
             text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
@@ -358,11 +331,10 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pub      = m.get("publication")
     pub_s    = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
-    # Translate message content from German only if user lang != 'de'
-    title_out = TR_MSG(context, html.escape(title_de), is_html=True)
+    title_out = TR_MSG(context, title_de, is_html=True)
     desc_out  = TR_MSG(context, desc_de, is_html=True)
 
-    text_html = f"📢 <b>{title_out}</b>\n🕓 {pub_s} UTC\n\n{desc_out}"
+    text_html = f"📢 <b>{html.escape(title_out)}</b>\n🕓 {pub_s} UTC\n\n{desc_out}"
     await safe_send_html(q.message.reply_text, text_html)
     await q.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
@@ -411,31 +383,41 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if root is not None:
         for s in root.findall("s"):
             tl = s.find("tl")
-            if tl is None: continue
-            line_code = tl.attrib.get("c", "")
-            if not line_code.startswith("S"): continue
+            if tl is None:
+                continue
+            # 'c' у tl почти всегда "S" — это класс, не номер линии
             dp = s.find("dp")
-            if dp is None: continue
+            if dp is None:
+                continue
             code = dp.attrib.get("pt", "")
             dt   = parse_db_time_to_aware_dt(code, tz)
-            if not dt: continue
-            if not (now_local <= dt <= horizon): continue
+            if not dt:
+                continue
+            if not (now_local <= dt <= horizon):
+                continue
             path = dp.attrib.get("ppth", "")
             dest = path.split("|")[-1] if path else "Unknown"
-            rows.append((line_code, dt, dest))
+
+            # 🔧 ВАЖНО: номер линии из атрибута 'l' у dp → "S2", "S3", ...
+            l_attr = dp.attrib.get("l")
+            if l_attr:
+                line_label = f"S{l_attr}"
+            else:
+                # fallback: если вдруг нет 'l', возьмем 'c' из tl (даст "S")
+                line_label = (tl.attrib.get("c") or "S")
+
+            rows.append((line_label, dt, dest))
 
     if not rows:
         await update.message.reply_text(TR_UI(context, "ℹ️ No departures in the next 60 minutes."), reply_markup=nav_menu(context))
         return
 
     rows.sort(key=lambda x: x[1])
-    # Format: S2 → Holzkirchen at 20:50  (no date)
     header = TR_UI(context, f"🚉 Departures from {station_name}")
     out_html = f"<b>{html.escape(header)}</b>\n\n"
-    for line_code, dt, dest in rows[:12]:
-        # Destination is a proper name; we leave it as-is (usually German station names).
-        line_line = TR_UI(context, " at ")  # only the small connector needs translation
-        out_html += f"{html.escape(line_code)} → {html.escape(dest)}{line_line}{dt.strftime('%H:%M')}\n"
+    at_txt = TR_UI(context, " at ")
+    for line_label, dt, dest in rows[:12]:
+        out_html += f"{html.escape(line_label)} → {html.escape(dest)}{at_txt}{dt.strftime('%H:%M')}\n"
 
     await safe_send_html(update.message.reply_text, out_html)
     await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
@@ -444,7 +426,6 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    # keep language, reset other state
     lang = get_user_lang(context)
     context.user_data.clear()
     context.user_data["lang"] = lang
