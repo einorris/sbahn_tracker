@@ -251,21 +251,40 @@ def _parse_time(code: Optional[str], tz: ZoneInfo) -> Optional[datetime.datetime
         return None
 
 def _line_from_nodes(tl: Optional[ET.Element], dp_or_ar: ET.Element) -> str:
-    # For S-Bahn, dp/ar attribute 'l' is the line number (e.g., "2") → "S2"
-    l_attr = dp_or_ar.attrib.get("l")
+    """Return normalized line label:
+       - prefer dp/ar attribute 'l' (already 'S2' or just '2')
+       - fallback to <tl c=... n=...>
+    """
+    l_attr = (dp_or_ar.attrib.get("l") or "").strip()
     if l_attr:
-        return f"S{l_attr}"
-    # Fallback: build from tl (category+number) if available
+        up = l_attr.upper()
+        # already like "S2", "S3E"
+        if up.startswith("S"):
+            return up
+        # digits or digits+suffix -> prefix S
+        if re.match(r"^\d+[A-Z]?$", up):
+            return f"S{up}"
+        # anything else -> still prefix S to be safe
+        return f"S{up}"
+
+    # fallback via <tl>
     if tl is not None:
-        c = tl.attrib.get("c")  # category letter, e.g. "S", "ICE"
-        n = tl.attrib.get("n")  # sometimes train no
+        c = (tl.attrib.get("c") or "").upper()   # category: S, ICE, RE, ...
+        n = (tl.attrib.get("n") or "").strip()
+        if c == "S":
+            # if tl has a number, use it
+            n_clean = re.sub(r"[^0-9A-Z]", "", n).upper()
+            if n_clean:
+                # if n already starts with S (rare), avoid double S
+                return n_clean if n_clean.startswith("S") else f"S{n_clean}"
+            return "S"
         if c and n:
-            # If c="S" and n looks like line → keep "S" (but n isn't line usually)
-            return c if c == "S" else f"{c} {n}"
+            return f"{c} {n}"
         if c:
             return c
-    # ultimate fallback
+
     return "S"
+
 
 def _dest_from_path(path: Optional[str]) -> Optional[str]:
     if not path:
