@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 BERLIN = ZoneInfo("Europe/Berlin")
 
-STATION_SYNONYMS.update({
+STATION_SYNONYMS = {
     # Общие правила: Munich -> München; ue/oe/ae -> ü/ö/ä (см. ниже режеx-правило)
     # Центр / Stammstrecke
     "munich hbf": "München Hbf",
@@ -88,7 +88,7 @@ STATION_SYNONYMS.update({
     "daglfing": "München-Daglfing",
     "englschalking": "München-Englschalking",
     "rietmoos": "Riemerling",  # иногда ошибочно так пишут — мапим на ближайшее частое
-})
+}
 
 
 EVA_BY_NAME = {
