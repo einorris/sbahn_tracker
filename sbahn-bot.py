@@ -551,6 +551,65 @@ def get_departures_window(
     filtered.sort(key=lambda e: e.effective_time() or e.pt)
     return filtered[:max_items], live_ok
 
+def format_departure_html(ev, context) -> str:
+    """Возвращает одну строку HTML с учетом:
+    - Линия (S2 / ICE 702 и т.п.)
+    - Направление (терминальная станция)
+    - Время: ct если есть, иначе pt; если ct != pt — pt зачеркнут
+    - Платформа: cp если есть, иначе pp; если смена — "Gleis X → Y"
+    - Задержка: +N мин
+    - Отмена: 'Fällt aus'
+    Пример: S2 → München Ost, <s>12:53</s> 12:58, Gleis 4, +5 min
+    """
+    # Линия/направление
+    line_label = ev.line_label or "S"
+    dest       = ev.dest or "—"
+    arrow      = " → "
+
+    # Время
+    t_eff = ev.effective_time() or ev.pt
+    if not t_eff:
+        return f"{line_label}{arrow}{dest}"  # fallback
+
+    hhmm_eff = t_eff.strftime("%H:%M")
+
+    time_html = hhmm_eff
+    if ev.pt and ev.ct:
+        # Если запланированное время отличается — зачеркнем pt
+        if ev.ct != ev.pt:
+            hhmm_pt = ev.pt.strftime("%H:%M")
+            time_html = f"<s>{hhmm_pt}</s> {hhmm_eff}"
+
+    # Платформа
+    platform_lbl = "Gleis"  # в DE UX привычно "Gleis"
+    p_old = ev.pp or ""
+    p_new = ev.cp or ""
+    if p_new and p_old and p_new != p_old:
+        platform_html = f"{platform_lbl} {html.escape(p_old)} → {html.escape(p_new)}"
+    elif p_new:
+        platform_html = f"{platform_lbl} {html.escape(p_new)}"
+    elif p_old:
+        platform_html = f"{platform_lbl} {html.escape(p_old)}"
+    else:
+        platform_html = ""
+
+    # Задержка
+    delay_html = ""
+    dm = ev.delay_minutes()
+    if dm is not None and dm != 0:
+        sign = "+" if dm > 0 else ""
+        # оставим "min" (у тебя так уже локализуется), можно заменить на TR_UI(context, " min")
+        delay_html = f"{sign}{dm} min"
+
+    # Отмена
+    cancel_html = "Fällt aus" if ev.canceled else ""
+
+    # Склейка блоков ", "-разделителями, без пустых
+    tail_parts = [p for p in [time_html, platform_html, delay_html, cancel_html] if p]
+    tail = ", ".join(tail_parts)
+
+    return f"{html.escape(line_label)}{arrow}{html.escape(dest)}, {tail}"
+
 # ================== UI HELPERS ==================
 def nav_menu(context):
     return InlineKeyboardMarkup([
@@ -723,65 +782,32 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"), reply_markup=nav_menu(context))
         return
 
+        # ... остаётся как есть до получения events ...
+
     if selected_line:
         header = TR_UI(context, f"🚉 Departures from {station_name} — {selected_line}")
     else:
         header = TR_UI(context, f"🚉 Departures from {station_name}")
-    
-    out_lines: List[str] = []
-    at_txt      = TR_UI(context, " at ")
-    platform    = TR_UI(context, "Platform")
-    canceled_t  = TR_UI(context, "Fällt aus")  # German word is common UX in DE; stays as-is in DE, translated otherwise
-    delay_sfx   = TR_UI(context, " min")
-    arrow       = " → "
 
+    # ✅ Формируем HTML-строки с зачеркнутым pt (если ct есть и отличается)
+    rows_html: List[str] = []
     for ev in events:
-        t = ev.effective_time() or ev.pt
-        if not t:
-            continue
-        hhmm = t.strftime("%H:%M")
+        rows_html.append(format_departure_html(ev, context))
 
-        # platform text
-        gleis_txt = ""
-        p_old = ev.pp or ""
-        p_new = ev.cp or ""
-        if p_new and p_old and p_new != p_old:
-            # Platform change Gleis X → Y
-            gleis_txt = f", {platform} {p_old} → {p_new}"
-        elif p_new:
-            gleis_txt = f", {platform} {p_new}"
-        elif p_old:
-            gleis_txt = f", {platform} {p_old}"
-
-        # delay text
-        delay_txt = ""
-        dm = ev.delay_minutes()
-        if dm is not None and dm != 0:
-            sign = "+" if dm > 0 else ""  # обычно показывают +N
-            delay_txt = f", {sign}{dm}{delay_sfx}"
-
-        # canceled
-        cancel_txt = f", {canceled_t}" if ev.canceled else ""
-
-        dest = ev.dest or "—"
-        line_label = ev.line_label or "S"
-
-        out_lines.append(f"{line_label}{arrow}{dest}{at_txt}{hhmm}{gleis_txt}{delay_txt}{cancel_txt}")
-
-    if not out_lines:
-        warn = TR_UI(context, "ℹ️ No train departures in the next 60 minutes.")
+    if not rows_html:
+        warn = TR_UI(context, "ℹ️ No departures in the next 60 minutes.")
         await update.message.reply_text(warn, reply_markup=nav_menu(context))
         return
 
-    body = "\n".join(out_lines)
-    footer = ""
+    body_html = "<br>".join(rows_html)
+    footer_html = ""
     if not live_ok:
-        footer = "\n\n" + TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
+        footer_html = "<br><br>" + TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
 
-    # Сначала заголовок жирным, потом тело plain (чтобы не сломать спецсимволы)
-    await safe_send_html(update.message.reply_text, f"<b>{html.escape(header)}</b>")
-    await update.message.reply_text(body + footer)
+    # Сначала жирный заголовок, потом тело — всё одним HTML
+    await safe_send_html(update.message.reply_text, f"<b>{html.escape(header)}</b><br>{body_html}{footer_html}")
     await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+
 
 # ----- Back / Change line -----
 async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
