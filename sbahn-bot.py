@@ -761,52 +761,133 @@ async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     await q.edit_message_text(TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"))
 
 async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает ввод станции пользователем:
+    - резолвит название в evaNo (допускает прямой ввод EVA: '8000261')
+    - тянет /plan (2 часа) + /fchg
+    - мержит, фильтрует окно [now-5m; now+60m], сортирует
+    - выводит до 15 отправлений с зачёркнутым pt при отличии от ct
+    """
     if not context.user_data.get("await_station"):
         return
     context.user_data["await_station"] = False
 
-    station_in = update.message.text.strip()
+    station_in = (update.message.text or "").strip()
     await update.message.reply_text(TR_UI(context, f"🔍 Searching departures for {station_in}..."))
 
-    eva, station_name = get_station_id_and_name(station_in)
+    # --- Разрешаем прямой ввод EVA числами ---
+    eva: Optional[int] = None
+    station_name: Optional[str] = None
+    if station_in.isdigit():
+        try:
+            eva = int(station_in)
+            station_name = station_in
+        except Exception:
+            eva = None
+
     if not eva:
-        await update.message.reply_text(TR_UI(context, "🚫 Station not found in Deutsche Bahn database."), reply_markup=nav_menu(context))
+        eva, station_name = get_station_id_and_name(station_in)
+
+    if not eva:
+        await update.message.reply_text(
+            TR_UI(context, "🚫 Station not found in Deutsche Bahn database."),
+            reply_markup=nav_menu(context),
+        )
         return
 
     now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     try:
         selected_line = context.user_data.get("line")  # например, "S2"
-        events, live_ok = get_departures_window(eva, now_local, max_items=15, selected_line=selected_line)
-
+        events, live_ok = get_departures_window(
+            eva=eva,
+            now_local=now_local,
+            max_items=15,
+            selected_line=selected_line
+        )
     except Exception as e:
-        await update.message.reply_text(TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"), reply_markup=nav_menu(context))
+        await update.message.reply_text(
+            TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"),
+            reply_markup=nav_menu(context),
+        )
         return
 
-        # ... остаётся как есть до получения events ...
-
+    # --- Заголовок ---
     if selected_line:
         header = TR_UI(context, f"🚉 Departures from {station_name} — {selected_line}")
     else:
         header = TR_UI(context, f"🚉 Departures from {station_name}")
 
-    # ✅ Формируем HTML-строки с зачеркнутым pt (если ct есть и отличается)
-    rows_html: List[str] = []
-    for ev in events:
-        rows_html.append(format_departure_html(ev, context))
+    # --- Форматирование строк (HTML) ---
+    out_lines_html: List[str] = []
+    at_txt      = TR_UI(context, " at ")
+    platform    = TR_UI(context, "Platform")
+    canceled_t  = TR_UI(context, "Fällt aus")  # оставляем DE-формулировку как стандарт для DE UX; переводится при др. языке
+    delay_sfx   = TR_UI(context, " min")
+    arrow       = " → "
 
-    if not rows_html:
+    for ev in events:
+        t_eff = ev.effective_time() or ev.pt
+        if not t_eff:
+            continue
+
+        # Время: если есть ct и он отличается от pt — показываем pt зачёркнутым, затем ct
+        hhmm_eff = t_eff.strftime("%H:%M")
+        time_html = html.escape(hhmm_eff)
+        if ev.pt and ev.ct and ev.ct != ev.pt:
+            pt_str = ev.pt.strftime("%H:%M")
+            time_html = f"<s>{html.escape(pt_str)}</s> {html.escape(hhmm_eff)}"
+
+        # Платформа (учитываем смену pp -> cp)
+        gleis_txt = ""
+        p_old = ev.pp or ""
+        p_new = ev.cp or ""
+        if p_new and p_old and p_new != p_old:
+            gleis_txt = f", {platform} {html.escape(p_old)} → {html.escape(p_new)}"
+        elif p_new:
+            gleis_txt = f", {platform} {html.escape(p_new)}"
+        elif p_old:
+            gleis_txt = f", {platform} {html.escape(p_old)}"
+
+        # Задержка (+N мин), если ct и pt заданы и различаются
+        delay_txt = ""
+        dm = ev.delay_minutes()
+        if dm is not None and dm != 0:
+            sign = "+" if dm > 0 else ""
+            delay_txt = f", {sign}{dm}{delay_sfx}"
+
+        # Отмена
+        cancel_txt = f", {canceled_t}" if ev.canceled else ""
+
+        # Направление/линия
+        dest = html.escape(ev.dest or "—")
+        line_label = html.escape(ev.line_label or "S")
+
+        out_lines_html.append(
+            f"{line_label}{arrow}{dest}{at_txt}{time_html}{gleis_txt}{delay_txt}{cancel_txt}"
+        )
+
+    if not out_lines_html:
         warn = TR_UI(context, "ℹ️ No departures in the next 60 minutes.")
         await update.message.reply_text(warn, reply_markup=nav_menu(context))
         return
 
-    body_html = "<br>".join(rows_html)
+    body_html = "<br>".join(out_lines_html)
     footer_html = ""
     if not live_ok:
-        footer_html = "<br><br>" + TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
+        footer_html = "<br><br>" + html.escape(
+            TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
+        )
 
-    # Сначала жирный заголовок, потом тело — всё одним HTML
-    await safe_send_html(update.message.reply_text, f"<b>{html.escape(header)}</b><br>{body_html}{footer_html}")
-    await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+    # --- Отправка ответа (HTML-безопасно) ---
+    await safe_send_html(update.message.reply_text, f"<b>{html.escape(header)}</b>")
+    await safe_send_html(update.message.reply_text, body_html + footer_html)
+
+    # Навигация
+    await update.message.reply_text(
+        TR_UI(context, "Choose what to do next:"),
+        reply_markup=nav_menu(context)
+    )
+
 
 
 # ----- Back / Change line -----
