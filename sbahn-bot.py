@@ -206,6 +206,7 @@ def _apply_aliases(q: str) -> str:
 
         # Airport
         "munich airport": "München Flughafen Terminal",
+        "airport": "München Flughafen Terminal",
         "muc": "München Flughafen Terminal",
         "flughafen münchen": "München Flughafen Terminal",
         "flughafen muenchen": "München Flughafen Terminal",
