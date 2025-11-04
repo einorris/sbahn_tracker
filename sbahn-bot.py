@@ -1020,7 +1020,6 @@ async def cmd_line(update, context):
     # без аргумента — показать пикер
     await update.message.reply_text(TR_UI(context, "🚆 Choose an S-Bahn line:"), reply_markup=line_picker_markup())
 
-app.add_handler(CommandHandler("line", cmd_line))
 
 async def cmd_messages(update, context):
     # переиспользуем on_show_messages, но из команды
