@@ -848,9 +848,9 @@ async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     line = q.data.replace(CB_LINE_PREFIX, "")
     context.user_data["line"] = line
-    await q.edit_message_text(T(context, "you_selected_line", line=line))
+    #await q.edit_message_text(T(context, "you_selected_line", line=line))
     await q.message.reply_text(
-        T(context, "actions"),
+        T(context, "you_selected_line", line=line),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(T(context, "btn_service_messages"), callback_data=CB_ACT_MSG)],
             [InlineKeyboardButton(T(context, "btn_train_departures"), callback_data=CB_ACT_DEP)],
