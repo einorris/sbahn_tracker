@@ -681,6 +681,8 @@ def format_departure_html(ev, context) -> str:
     if dm is not None and dm != 0:
         sign = "+" if dm > 0 else ""
         delay_html = f"{sign}{dm}"
+    # убрать если захотим вернуть время задержки
+    delay_html = ""
 
     # Собираем «тело» без текста отмены — его добавим снаружи
     tail_parts = [p for p in [time_html, platform_html, delay_html] if p]
