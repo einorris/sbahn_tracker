@@ -13,7 +13,6 @@ from typing import Dict, List, Optional, Tuple
 
 from datetime import timezone, timedelta
 from zoneinfo import ZoneInfo
-from telegram.ext import CommandHandler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -37,7 +36,7 @@ DB_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
 HTTP_TIMEOUT = 5   # seconds
 HTTP_RETRIES = 2   # additional attempts (1 + 2)
 
-# Toggle for Ukrainian UI presence (translations infra kept, button hidden)
+# Украинский UI временно выключен
 ENABLE_UKRAINIAN = False
 
 # Short, safe callback keys
@@ -56,7 +55,7 @@ SUPPORTED_LANGS = ["de", "en"] if not ENABLE_UKRAINIAN else ["de", "en", "uk"]
 DEEPL_URL = "https://api-free.deepl.com/v2/translate"
 
 def _deepl_supported_target(lang_code: str) -> str:
-    # If ENABLE_UKRAINIAN is turned on later, extend mapping with {"uk": "UK"}.
+    # Если включишь украинский, добавь {"uk": "UK"}.
     return {"de": "DE", "en": "EN"}.get(lang_code, "EN")
 
 def deepl_translate(text: str, target_lang: str, is_html: bool) -> str:
@@ -82,8 +81,8 @@ def get_user_lang(context) -> str:
 
 def TR_UI(context, text_en: str, is_html: bool=False) -> str:
     """
-    UI strings are authored in EN. If user is DE, translate to DE via DeepL. 
-    Ukrainian is intentionally hidden for now.
+    UI-строки авторим на EN. Если пользователь DE, переводим через DeepL.
+    Украинский скрыт.
     """
     lang = get_user_lang(context)
     if lang == "en":
@@ -92,8 +91,7 @@ def TR_UI(context, text_en: str, is_html: bool=False) -> str:
 
 def TR_MSG(context, text_de: str, is_html: bool=False) -> str:
     """
-    Content strings (from MVG) are in DE by default.
-    If user lang is DE, return as-is; else translate to user's target.
+    Контент MVG на DE. Если пользователь не DE — переводим в его язык.
     """
     lang = get_user_lang(context)
     if lang == "de":
@@ -161,12 +159,12 @@ def _apply_aliases(q: str) -> str:
 
         "karlsplatz": "München Karlsplatz (Stachus)",
         "stachus": "München Karlsplatz (Stachus)",
-        "karlsplatz (stachus)": "Мünchen Karlsplatz (Stachus)",
+        "karlsplatz (stachus)": "München Karlsplatz (Stachus)",
 
         "isartor": "München Isartor",
-        "rosenheimer platz": "Мünchen Rosenheimer Platz",
+        "rosenheimer platz": "München Rosenheimer Platz",
         "hackerbrücke": "München Hackerbrücke",
-        "hackerbruecke": "München Hackerbrücke",
+        "hackerbruecke": "Мünchen Hackerbrücke",
         "donnersbergerbruecke": "München Donnersbergerbrücke",
         "donnersbergerbrücke": "Мünchen Donnersbergerbrücke",
         "laim": "München Laim",
@@ -180,12 +178,11 @@ def _apply_aliases(q: str) -> str:
         "muenchen ostbahnhof": "München Ost",
         "münchen ostbahnhof": "München Ost",
         "leuchtenbergring": "München Leuchtenbergring",
-        "berg am laim": "München-Berg am Laim",
+        "berg am laim": "Мünchen-Berg am Laim",
         "trudering": "München-Trudering",
         "riem": "München-Riem",
 
         # South-east (S3/S7/S20)
-        "gising": "München Giesing",
         "giesing": "München Giesing",
         "harras": "München Harras",
         "mittersendling": "Mittersendling",
@@ -210,7 +207,6 @@ def _apply_aliases(q: str) -> str:
         "muc": "München Flughafen Terminal",
         "flughafen münchen": "München Flughafen Terminal",
         "flughafen muenchen": "München Flughafen Terminal",
-        "munich international airport": "München Flughafen Terminal",
         "visitor park": "München Flughafen Besucherpark",
         "besucherpark": "München Flughafen Besucherpark",
 
@@ -234,6 +230,7 @@ def _station_search(query: str):
       - top-level list
       - dict with a list under: result/results/stations/stopPlaces
     Tries several parameter names used across variants.
+    Filters strictly to Bavaria: federalStateCode == "DE-BY".
     """
     url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
     headers = {
@@ -258,13 +255,25 @@ def _station_search(query: str):
                 except Exception:
                     continue
 
+                stations = None
                 if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
+                    stations = data
+                elif isinstance(data, dict):
                     for key in ("result", "results", "stations", "stopPlaces", "stopplaces"):
                         val = data.get(key)
                         if isinstance(val, list):
-                            return val
+                            stations = val
+                            break
+
+                if stations is None:
+                    continue
+
+                # >>> ФИЛЬТР Баварии + избавиться от пустых записей без evaNumbers
+                stations = [s for s in stations
+                            if (s.get("federalStateCode") == "DE-BY") and s.get("evaNumbers")]
+
+                if stations:
+                    return stations
             except Exception:
                 pass
         if attempt < HTTP_RETRIES:
@@ -281,13 +290,13 @@ def _pick_best_station(results, query_norm: str):
         if nn == query_norm: score += 100
         if nn.startswith(query_norm) or query_norm.startswith(nn): score += 50
         if query_norm in nn: score += 25
+        # BY уже отфильтрован, но на всякий случай
         if s.get("federalStateCode") == "DE-BY": score += 5
         if score > best_score:
             best = s; best_score = score
     return best
 
 def rank_stations(results, query_norm: str):
-    """Return [(station, score), ...] sorted by score desc."""
     ranked = []
     for s in results:
         if not s.get("evaNumbers"):
@@ -310,13 +319,13 @@ def rank_stations(results, query_norm: str):
 def find_station_candidates(user_input: str, limit: int = 3):
     """
     Returns (best_exact_match, candidates)
-    best_exact_match — station dict on exact name match (score >= 100 and nn == query_norm),
-    candidates — up to 3 best candidates.
+    best_exact_match — station dict on exact name match,
+    candidates — up to 3 best candidates (Bavaria-only).
     """
     primary = _apply_aliases(user_input)
     qn = _norm(primary)
 
-    # 1) as typed (with alias applied)
+    # 1) как ввёл (с алиасом)
     results = _station_search(primary)
     ranked = rank_stations(results, qn)
 
@@ -326,7 +335,7 @@ def find_station_candidates(user_input: str, limit: int = 3):
         if nn == qn:
             return top_station, []
 
-    # 2) "*...*" (may or may not work depending on backend)
+    # 2) "*...*"
     if not ranked:
         wildcard = f"*{user_input}*"
         results = _station_search(wildcard)
@@ -396,7 +405,6 @@ class Event:
         return None
 
 # Cache for /plan
-# key: (eva, yyyymmdd, HH) -> (expires_ts, List[Event])
 PLAN_CACHE: Dict[Tuple[int,str,str], Tuple[float,List[Event]]] = {}
 
 def _requests_get(url: str, headers: dict) -> Optional[str]:
@@ -422,11 +430,6 @@ def _parse_time(code: Optional[str], tz: ZoneInfo) -> Optional[datetime.datetime
         return None
 
 def _line_from_nodes(tl: Optional[ET.Element], dp_or_ar: ET.Element) -> str:
-    """
-    Return normalized line label for S-Bahn:
-      - prefer dp/ar attribute 'l' (already 'S2' or just '2')
-      - fallback to <tl c=... n=...>
-    """
     l_attr = (dp_or_ar.attrib.get("l") or "").strip()
     if l_attr:
         up = l_attr.upper()
@@ -482,13 +485,12 @@ def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
         if not sid:
             continue
         tl = s.find("tl")
-        # Only S-Bahn
         if tl is None or (tl.attrib.get("c") or "").upper() != "S":
             continue
 
         dp = s.find("dp")
         if dp is None:
-            continue  # only departures
+            continue
 
         pt = _parse_time(dp.attrib.get("pt"), tz)
         pp = dp.attrib.get("pp")
@@ -559,7 +561,6 @@ def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
     return changes
 
 def merge_plan_with_changes(plan: List[Event], changes: Dict[str, Event]) -> List[Event]:
-    """Apply fchg over plan. Add ad-hoc from fchg if missing in plan."""
     by_id: Dict[str, Event] = {e.id: e for e in plan}
     for sid, ch in changes.items():
         if sid in by_id:
@@ -586,7 +587,7 @@ def get_departures_window(
 ) -> Tuple[List[Event], bool]:
     """
     Returns (events, live_ok)
-      - events: 0..15 merged and filtered departures within [now-5m, now+60m]
+      - events: 0..15 within [now-5m, now+60m]
       - live_ok: whether fchg endpoint succeeded
     """
     tz = ZoneInfo("Europe/Berlin")
@@ -629,15 +630,6 @@ def get_departures_window(
     return filtered[:max_items], live_ok
 
 def format_departure_html(ev, context) -> str:
-    """
-    One-line HTML:
-      - Line (S2 / ICE / …)
-      - Destination
-      - Time (strike pt if differs from ct)
-      - Platform (cp overrides pp)
-      - Delay (+N min)
-      - Cancellation
-    """
     line_label = ev.line_label or "S"
     dest       = ev.dest or "—"
     arrow      = " → "
@@ -734,14 +726,6 @@ def fetch_line_messages_safe(line: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Choose language / Sprache wählen:", reply_markup=lang_picker_markup())
-
-async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cur = get_user_lang(context)
-    key_state = "OK" if DEEPL_AUTH_KEY else "MISSING"
-    await update.message.reply_text(
-        f"Language: {cur}\nDeepL key: {key_state}\n\nChoose language / Sprache wählen:",
-        reply_markup=lang_picker_markup()
-    )
 
 async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -863,26 +847,22 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=nav_menu(context)
             )
             return
-        
-        # >>> добавлено: кэш имён станций по EVA
+
+        # кэш имён станций по EVA для on_station_picked
         context.user_data["station_map"] = {}
 
         rows = []
         for s in candidates:
             name = s.get("name", "—")
             eva = s["evaNumbers"][0]["number"]
-
-            # сохраним имя для on_station_picked
             context.user_data["station_map"][str(eva)] = name
 
-            muni = s.get("municipality") or ""
+            muni  = s.get("municipality") or ""
             state = s.get("federalStateCode") or ""
-            #label = f"{name} ({eva})"
-            label = f"{name}"
+            label = f"{name} ({eva})"
             if muni or state:
                 extra = " — ".join([p for p in [muni, state] if p])
-                label = f"{name} · {extra}"
-
+                label = f"{name} · {extra} ({eva})"
             rows.append([InlineKeyboardButton(label, callback_data=f"{CB_PICK_STATION}{eva}")])
 
         rows.append([InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)])
@@ -975,13 +955,8 @@ async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     eva_str = data[len(CB_PICK_STATION):].strip()
 
-    # >>> новое: берем имя из кэша, куда положили в on_station_input
     station_map = context.user_data.get("station_map") or {}
-    station_name = station_map.get(eva_str)
-
-    if not station_name:
-        # запасной вариант, если кэш потерялся (долго ждали или промотали историю)
-        station_name = f"EVA {eva_str}"
+    station_name = station_map.get(eva_str) or f"EVA {eva_str}"
 
     try:
         eva = int(eva_str)
@@ -993,7 +968,6 @@ async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await _send_departures_for_eva(q.message, context, eva, station_name)
-
 
 # ----- Back / Change line -----
 async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
