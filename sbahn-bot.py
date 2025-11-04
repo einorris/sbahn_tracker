@@ -34,27 +34,29 @@ DEEPL_AUTH_KEY = os.getenv("DEEPL_AUTH_KEY")  # xxxxxxxx:fx
 MVG_URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
 DB_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
 
-HTTP_TIMEOUT = 5  # сек
-HTTP_RETRIES = 2   # доп. попытки (итого 1+2)
+HTTP_TIMEOUT = 5   # seconds
+HTTP_RETRIES = 2   # additional attempts (1 + 2)
+
+# Toggle for Ukrainian UI presence (translations infra kept, button hidden)
+ENABLE_UKRAINIAN = False
 
 # Short, safe callback keys
-CB_LANG_PREFIX   = "LANG:"    # LANG:de / LANG:en / LANG:uk
+CB_LANG_PREFIX   = "LANG:"    # LANG:de / LANG:en [/ LANG:uk when enabled]
 CB_LINE_PREFIX   = "L:"       # e.g. L:S2
 CB_ACT_MSG       = "A:MSG"
 CB_ACT_DEP       = "A:DEP"
 CB_BACK_MAIN     = "B:MAIN"
 CB_DETAIL_PREFIX = "D:"
-CB_PICK_STATION = "ST:"   # выбор конкретной станции из списка кандидатов
-CB_BACK_ACTIONS = "B:ACT"   # вернуться к меню Actions (Show Messages / Show Departures)
+CB_PICK_STATION  = "ST:"      # choosing a specific station from candidates
+CB_BACK_ACTIONS  = "B:ACT"    # back to Actions (Messages / Departures)
 
-
-SUPPORTED_LANGS = ["de", "en", "uk"]  # Deutsch, English, Українська
+SUPPORTED_LANGS = ["de", "en"] if not ENABLE_UKRAINIAN else ["de", "en", "uk"]
 
 # ================== TRANSLATION (DeepL) ==================
 DEEPL_URL = "https://api-free.deepl.com/v2/translate"
 
 def _deepl_supported_target(lang_code: str) -> str:
-    #return {"de": "DE", "en": "EN", "uk": "UK"}.get(lang_code, "EN")
+    # If ENABLE_UKRAINIAN is turned on later, extend mapping with {"uk": "UK"}.
     return {"de": "DE", "en": "EN"}.get(lang_code, "EN")
 
 def deepl_translate(text: str, target_lang: str, is_html: bool) -> str:
@@ -79,12 +81,20 @@ def get_user_lang(context) -> str:
     return context.user_data.get("lang", "en")
 
 def TR_UI(context, text_en: str, is_html: bool=False) -> str:
+    """
+    UI strings are authored in EN. If user is DE, translate to DE via DeepL. 
+    Ukrainian is intentionally hidden for now.
+    """
     lang = get_user_lang(context)
     if lang == "en":
         return text_en
     return deepl_translate(text_en, _deepl_supported_target(lang), is_html)
 
 def TR_MSG(context, text_de: str, is_html: bool=False) -> str:
+    """
+    Content strings (from MVG) are in DE by default.
+    If user lang is DE, return as-is; else translate to user's target.
+    """
     lang = get_user_lang(context)
     if lang == "de":
         return text_de
@@ -138,81 +148,81 @@ def _norm(s: str) -> str:
 def _apply_aliases(q: str) -> str:
     qn = _norm(q)
     aliases = {
-    "munich hbf": "München Hbf",
-    "munich hauptbahnhof": "München Hbf",
-    "muenchen hbf": "München Hbf",
-    "muenchen hauptbahnhof": "München Hbf",
-    "münchen hauptbahnhof": "München Hbf",
-    "hbf tief": "München Hbf",  # иногда прилетает как «Hbf (tief)»
-    "hauptbahnhof": "München Hbf",
+        "munich hbf": "München Hbf",
+        "munich hauptbahnhof": "München Hbf",
+        "muenchen hbf": "München Hbf",
+        "muenchen hauptbahnhof": "München Hbf",
+        "münchen hauptbahnhof": "München Hbf",
+        "hbf tief": "München Hbf",
+        "hauptbahnhof": "München Hbf",
 
-    "marienplatz": "München Marienplatz",
-    "marienplatz (tief)": "München Marienplatz",
+        "marienplatz": "München Marienplatz",
+        "marienplatz (tief)": "München Marienplatz",
 
-    "karlsplatz": "München Karlsplatz (Stachus)",
-    "stachus": "München Karlsplatz (Stachus)",
-    "karlsplatz (stachus)": "München Karlsplatz (Stachus)",
+        "karlsplatz": "München Karlsplatz (Stachus)",
+        "stachus": "München Karlsplatz (Stachus)",
+        "karlsplatz (stachus)": "Мünchen Karlsplatz (Stachus)",
 
-    "isartor": "München Isartor",
-    "rosenheimer platz": "München Rosenheimer Platz",
-    "hackerbrücke": "München Hackerbrücke",
-    "hackerbruecke": "München Hackerbrücke",
-    "donnersbergerbruecke": "München Donnersbergerbrücke",
-    "donnersbergerbrücke": "München Donnersbergerbrücke",
-    "laim": "München Laim",
-    "pasing": "München-Pasing",
-    "muenchen pasing": "München-Pasing",
-    "münchen pasing": "München-Pasing",
+        "isartor": "München Isartor",
+        "rosenheimer platz": "Мünchen Rosenheimer Platz",
+        "hackerbrücke": "München Hackerbrücke",
+        "hackerbruecke": "München Hackerbrücke",
+        "donnersbergerbruecke": "München Donnersbergerbrücke",
+        "donnersbergerbrücke": "Мünchen Donnersbergerbrücke",
+        "laim": "München Laim",
+        "pasing": "München-Pasing",
+        "muenchen pasing": "München-Pasing",
+        "münchen pasing": "München-Pasing",
 
-    # Восток
-    "ostbahnhof": "München Ost",
-    "munich east": "München Ost",
-    "muenchen ostbahnhof": "München Ost",
-    "münchen ostbahnhof": "München Ost",
-    "leuchtenbergring": "München Leuchtenbergring",
-    "berg am laim": "München-Berg am Laim",
-    "trudering": "München-Trudering",
-    "riem": "München-Riem",
+        # East
+        "ostbahnhof": "München Ost",
+        "munich east": "München Ost",
+        "muenchen ostbahnhof": "München Ost",
+        "münchen ostbahnhof": "München Ost",
+        "leuchtenbergring": "München Leuchtenbergring",
+        "berg am laim": "München-Berg am Laim",
+        "trudering": "München-Trudering",
+        "riem": "München-Riem",
 
-    # Юг/юго-восток (S3/S7/S20)
-    "gising": "München Giesing",   # частая опечатка
-    "giesing": "München Giesing",
-    "harras": "München Harras",
-    "mittersendling": "Mittersendling",
-    "siemenswerke": "Siemenswerke",
-    "solln": "München Solln",
-    "fasangarten": "Fasangarten",
-    "neuperlach süd": "Neuperlach Süd",
-    "neuperlach sud": "Neuperlach Süd",
-    "ebersberg" : "Ebersberg (Oberbay)",
+        # South-east (S3/S7/S20)
+        "gising": "München Giesing",
+        "giesing": "München Giesing",
+        "harras": "München Harras",
+        "mittersendling": "Mittersendling",
+        "siemenswerke": "Siemenswerke",
+        "solln": "München Solln",
+        "fasangarten": "Fasangarten",
+        "neuperlach süd": "Neuperlach Süd",
+        "neuperlach sud": "Neuperlach Süd",
+        "ebersberg" : "Ebersberg (Oberbay)",
 
-    # Север/северо-восток (S1/S8/S3)
-    "feldmoching": "München-Feldmoching",
-    "moosach": "München-Moosach",
-    "oberwiesenfeld": "Oberwiesenfeld",  # иногда лезет из U-Bahn — игнорируй при желании
-    "unterföhring": "Unterföhring",
-    "unterfoehring": "Unterföhring",
-    "ismaning": "Ismaning",
+        # North-east (S1/S8/S3)
+        "feldmoching": "München-Feldmoching",
+        "moosach": "München-Moosach",
+        "oberwiesenfeld": "Oberwiesenfeld",
+        "unterföhring": "Unterföhring",
+        "unterfoehring": "Unterföhring",
+        "ismaning": "Ismaning",
 
-    # Аэропорт
-    "munich airport": "München Flughafen Terminal",
-    "muc": "München Flughafen Terminal",
-    "flughafen münchen": "München Flughafen Terminal",
-    "flughafen muenchen": "München Flughafen Terminal",
-    "munich international airport": "München Flughafen Terminal",
-    "visitor park": "München Flughafen Besucherpark",
-    "besucherpark": "München Flughafen Besucherpark",
+        # Airport
+        "munich airport": "München Flughafen Terminal",
+        "muc": "München Flughafen Terminal",
+        "flughafen münchen": "München Flughafen Terminal",
+        "flughafen muenchen": "München Flughafen Terminal",
+        "munich international airport": "München Flughafen Terminal",
+        "visitor park": "München Flughafen Besucherpark",
+        "besucherpark": "München Flughafen Besucherpark",
 
-    # Восточная дуга S2 до Эрдинга
-    "erding": "Erding",
-    "altenerding": "Altenerding",
-    "aufhausen (oberbay)": "Aufhausen (Oberbay)",
-    "markt schwaben": "Markt Schwaben",
-    "grub (oberbay)": "Grub (Oberbay)",
-    "heimstetten": "Heimstetten",
-    "daglfing": "München-Daglfing",
-    "englschalking": "München-Englschalking",
-    "rietmoos": "Riemerling", 
+        # S2 to Erding
+        "erding": "Erding",
+        "altenerding": "Altenerding",
+        "aufhausen (oberbay)": "Aufhausen (Oberbay)",
+        "markt schwaben": "Markt Schwaben",
+        "grub (oberbay)": "Grub (Oberbay)",
+        "heimstetten": "Heimstetten",
+        "daglfing": "München-Daglfing",
+        "englschalking": "München-Englschalking",
+        "rietmoos": "Riemerling",
     }
     return aliases.get(qn, q)
 
@@ -220,8 +230,8 @@ def _station_search(query: str):
     """
     Search stations via DB Station-Data v2.
     Handles both response shapes:
-    - top-level list
-    - dict with a list under: result/results/stations/stopPlaces
+      - top-level list
+      - dict with a list under: result/results/stations/stopPlaces
     Tries several parameter names used across variants.
     """
     url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
@@ -259,10 +269,12 @@ def _station_search(query: str):
         if attempt < HTTP_RETRIES:
             time.sleep(0.3 * (2 ** attempt))
     return []
+
 def _pick_best_station(results, query_norm: str):
     best = None; best_score = -1
     for s in results:
-        if not s.get("evaNumbers"): continue
+        if not s.get("evaNumbers"):
+            continue
         name = s.get("name", ""); nn = _norm(name)
         score = 0
         if nn == query_norm: score += 100
@@ -272,8 +284,9 @@ def _pick_best_station(results, query_norm: str):
         if score > best_score:
             best = s; best_score = score
     return best
+
 def rank_stations(results, query_norm: str):
-    """Вернёт [(station_obj, score), ...] по убыванию score."""
+    """Return [(station, score), ...] sorted by score desc."""
     ranked = []
     for s in results:
         if not s.get("evaNumbers"):
@@ -295,25 +308,24 @@ def rank_stations(results, query_norm: str):
 
 def find_station_candidates(user_input: str, limit: int = 3):
     """
-    Возвращает (best_exact_match: dict|None, candidates: List[dict])
-    best_exact_match — объект станции при точном совпадении (score >= 100 и nn == query_norm),
-    candidates — до 3 лучших кандидатов (без жесткой фильтрации по score).
+    Returns (best_exact_match, candidates)
+    best_exact_match — station dict on exact name match (score >= 100 and nn == query_norm),
+    candidates — up to 3 best candidates.
     """
     primary = _apply_aliases(user_input)
     qn = _norm(primary)
 
-    # 1) как ввели
+    # 1) as typed (with alias applied)
     results = _station_search(primary)
     ranked = rank_stations(results, qn)
 
-    # точное совпадение?
     if ranked and ranked[0][1] >= 100:
         top_station = ranked[0][0]
         nn = _norm(top_station.get("name", ""))
         if nn == qn:
             return top_station, []
 
-    # 2) *...*
+    # 2) "*...*" (may or may not work depending on backend)
     if not ranked:
         wildcard = f"*{user_input}*"
         results = _station_search(wildcard)
@@ -327,11 +339,9 @@ def find_station_candidates(user_input: str, limit: int = 3):
             if ranked:
                 break
 
-    # если всё равно пусто
     if not ranked:
         return None, []
 
-    # вернём до 3-х
     candidates = [s for (s, _) in ranked[:limit]]
     return None, candidates
 
@@ -365,12 +375,12 @@ def get_station_id_and_name(station_query: str) -> Tuple[Optional[int], Optional
 @dataclass
 class Event:
     id: str
-    line_label: str               # e.g. S2 / ICE / etc
-    pt: Optional[datetime.datetime] = None   # planned time
-    ct: Optional[datetime.datetime] = None   # changed time
-    pp: Optional[str] = None      # planned platform
-    cp: Optional[str] = None      # changed platform
-    dest: Optional[str] = None    # terminal station
+    line_label: str
+    pt: Optional[datetime.datetime] = None
+    ct: Optional[datetime.datetime] = None
+    pp: Optional[str] = None
+    cp: Optional[str] = None
+    dest: Optional[str] = None
     canceled: bool = False
     raw_tl: Dict[str, str] = field(default_factory=dict)
     raw_node_attrs: Dict[str, str] = field(default_factory=dict)
@@ -384,7 +394,7 @@ class Event:
             return delta if delta != 0 else None
         return None
 
-# ---------- cache for /plan ----------
+# Cache for /plan
 # key: (eva, yyyymmdd, HH) -> (expires_ts, List[Event])
 PLAN_CACHE: Dict[Tuple[int,str,str], Tuple[float,List[Event]]] = {}
 
@@ -411,40 +421,33 @@ def _parse_time(code: Optional[str], tz: ZoneInfo) -> Optional[datetime.datetime
         return None
 
 def _line_from_nodes(tl: Optional[ET.Element], dp_or_ar: ET.Element) -> str:
-    """Return normalized line label:
-       - prefer dp/ar attribute 'l' (already 'S2' or just '2')
-       - fallback to <tl c=... n=...>
+    """
+    Return normalized line label for S-Bahn:
+      - prefer dp/ar attribute 'l' (already 'S2' or just '2')
+      - fallback to <tl c=... n=...>
     """
     l_attr = (dp_or_ar.attrib.get("l") or "").strip()
     if l_attr:
         up = l_attr.upper()
-        # already like "S2", "S3E"
         if up.startswith("S"):
             return up
-        # digits or digits+suffix -> prefix S
         if re.match(r"^\d+[A-Z]?$", up):
             return f"S{up}"
-        # anything else -> still prefix S to be safe
         return f"S{up}"
 
-    # fallback via <tl>
     if tl is not None:
-        c = (tl.attrib.get("c") or "").upper()   # category: S, ICE, RE, ...
+        c = (tl.attrib.get("c") or "").upper()
         n = (tl.attrib.get("n") or "").strip()
         if c == "S":
-            # if tl has a number, use it
             n_clean = re.sub(r"[^0-9A-Z]", "", n).upper()
             if n_clean:
-                # if n already starts with S (rare), avoid double S
                 return n_clean if n_clean.startswith("S") else f"S{n_clean}"
             return "S"
         if c and n:
             return f"{c} {n}"
         if c:
             return c
-
     return "S"
-
 
 def _dest_from_path(path: Optional[str]) -> Optional[str]:
     if not path:
@@ -478,13 +481,13 @@ def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
         if not sid:
             continue
         tl = s.find("tl")
-        # ✅ Только S-Bahn
+        # Only S-Bahn
         if tl is None or (tl.attrib.get("c") or "").upper() != "S":
             continue
 
         dp = s.find("dp")
         if dp is None:
-            continue  # только отправления
+            continue  # only departures
 
         pt = _parse_time(dp.attrib.get("pt"), tz)
         pp = dp.attrib.get("pp")
@@ -504,7 +507,6 @@ def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
     PLAN_CACHE[key] = (now + 90, events)
     return events
 
-
 def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
     headers = {"Accept": "application/xml","DB-Client-Id": CLIENT_ID,"DB-Api-Key": API_KEY_DB}
     url = f"{DB_BASE}/fchg/{eva}"
@@ -522,13 +524,12 @@ def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
         if not sid:
             continue
         tl = s.find("tl")
-        # ✅ Только S-Bahn
         if tl is None or (tl.attrib.get("c") or "").upper() != "S":
             continue
 
         dp = s.find("dp")
         if dp is None:
-            continue  # только отправления
+            continue
 
         ct = _parse_time(dp.attrib.get("ct"), tz)
         cp = dp.attrib.get("cp")
@@ -554,33 +555,24 @@ def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
             raw_tl = tl.attrib if tl is not None else {},
             raw_node_attrs = dict(dp.attrib),
         )
-
     return changes
-
 
 def merge_plan_with_changes(plan: List[Event], changes: Dict[str, Event]) -> List[Event]:
     """Apply fchg over plan. Add ad-hoc from fchg if missing in plan."""
     by_id: Dict[str, Event] = {e.id: e for e in plan}
-    # Apply changes
     for sid, ch in changes.items():
         if sid in by_id:
             base = by_id[sid]
-            # Line can change (rare) — prefer change's line if present
             if ch.line_label: base.line_label = ch.line_label
-            # Time/platform overrides
             if ch.ct: base.ct = ch.ct
             if ch.cp: base.cp = ch.cp
             if ch.pt and not base.pt: base.pt = ch.pt
             if ch.pp and not base.pp: base.pp = ch.pp
-            # Destination/path might change
             if ch.dest: base.dest = ch.dest
-            # Cancellation
             base.canceled = base.canceled or ch.canceled
-            # Keep attrs (for debugging)
             base.raw_tl.update(ch.raw_tl)
             base.raw_node_attrs.update(ch.raw_node_attrs)
         else:
-            # Ad-hoc departure — include as is
             by_id[sid] = ch
     return list(by_id.values())
 
@@ -593,28 +585,25 @@ def get_departures_window(
 ) -> Tuple[List[Event], bool]:
     """
     Returns (events, live_ok)
-    - events: 0..15 merged and filtered departures within [now-5m, now+60m]
-    - live_ok: whether fchg endpoint succeeded
+      - events: 0..15 merged and filtered departures within [now-5m, now+60m]
+      - live_ok: whether fchg endpoint succeeded
     """
     tz = ZoneInfo("Europe/Berlin")
     now_local = now_local.astimezone(tz)
     prev = now_local - timedelta(minutes=5)
     horizon = now_local + timedelta(minutes=60)
 
-    # determine two hours: current and next (handle wrap at 23->00 next day)
     d1 = now_local.strftime("%y%m%d")
     h1 = now_local.strftime("%H")
     dt2 = now_local + timedelta(hours=1)
     d2 = dt2.strftime("%y%m%d")
     h2 = dt2.strftime("%H")
 
-    # fetch plan for both hours (cached)
     plan1 = fetch_plan(eva, d1, h1, tz)
     plan2 = fetch_plan(eva, d2, h2, tz)
-    plan_all = {e.id: e for e in (plan1 + plan2)}  # dedupe by id
+    plan_all = {e.id: e for e in (plan1 + plan2)}
     plan_list = list(plan_all.values())
 
-    # fetch live changes
     live_ok = True
     try:
         changes = fetch_fchg(eva, tz)
@@ -624,13 +613,10 @@ def get_departures_window(
 
     merged = merge_plan_with_changes(plan_list, changes)
 
-    # optional filter by selected S-line, e.g. "S2"
     if selected_line:
         sel = selected_line.upper().strip()
         merged = [e for e in merged if (e.line_label or "").upper().startswith(sel)]
 
-
-    # filter window + only departures
     def in_window(ev: Event) -> bool:
         t = ev.effective_time() or ev.pt
         if not t:
@@ -638,41 +624,34 @@ def get_departures_window(
         return (prev <= t <= horizon)
 
     filtered = [e for e in merged if in_window(e)]
-    # sort by effective time (ct if exists, else pt)
     filtered.sort(key=lambda e: e.effective_time() or e.pt)
     return filtered[:max_items], live_ok
 
 def format_departure_html(ev, context) -> str:
-    """Возвращает одну строку HTML с учетом:
-    - Линия (S2 / ICE 702 и т.п.)
-    - Направление (терминальная станция)
-    - Время: ct если есть, иначе pt; если ct != pt — pt зачеркнут
-    - Платформа: cp если есть, иначе pp; если смена — "Gleis X → Y"
-    - Задержка: +N мин
-    - Отмена: 'Fällt aus'
-    Пример: S2 → München Ost, <s>12:53</s> 12:58, Gleis 4, +5 min
     """
-    # Линия/направление
+    One-line HTML:
+      - Line (S2 / ICE / …)
+      - Destination
+      - Time (strike pt if differs from ct)
+      - Platform (cp overrides pp)
+      - Delay (+N min)
+      - Cancellation
+    """
     line_label = ev.line_label or "S"
     dest       = ev.dest or "—"
     arrow      = " → "
 
-    # Время
     t_eff = ev.effective_time() or ev.pt
     if not t_eff:
-        return f"{line_label}{arrow}{dest}"  # fallback
+        return f"{line_label}{arrow}{dest}"
 
     hhmm_eff = t_eff.strftime("%H:%M")
-
     time_html = hhmm_eff
-    if ev.pt and ev.ct:
-        # Если запланированное время отличается — зачеркнем pt
-        if ev.ct != ev.pt:
-            hhmm_pt = ev.pt.strftime("%H:%M")
-            time_html = f"<s>{hhmm_pt}</s> {hhmm_eff}"
+    if ev.pt and ev.ct and ev.ct != ev.pt:
+        hhmm_pt = ev.pt.strftime("%H:%M")
+        time_html = f"<s>{hhmm_pt}</s> {hhmm_eff}"
 
-    # Платформа
-    platform_lbl = "Gleis"  # в DE UX привычно "Gleis"
+    platform_lbl = "Gleis"
     p_old = ev.pp or ""
     p_new = ev.cp or ""
     if p_new and p_old and p_new != p_old:
@@ -684,18 +663,14 @@ def format_departure_html(ev, context) -> str:
     else:
         platform_html = ""
 
-    # Задержка
     delay_html = ""
     dm = ev.delay_minutes()
     if dm is not None and dm != 0:
         sign = "+" if dm > 0 else ""
-        # оставим "min" (у тебя так уже локализуется), можно заменить на TR_UI(context, " min")
         delay_html = f"{sign}{dm} min"
 
-    # Отмена
     cancel_html = "Fällt aus" if ev.canceled else ""
 
-    # Склейка блоков ", "-разделителями, без пустых
     tail_parts = [p for p in [time_html, platform_html, delay_html, cancel_html] if p]
     tail = ", ".join(tail_parts)
 
@@ -705,8 +680,8 @@ def format_departure_html(ev, context) -> str:
 def nav_menu(context):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(TR_UI(context, "📰 Service Messages"),   callback_data=CB_ACT_MSG),
-            InlineKeyboardButton(TR_UI(context, "🚉 Train departures"), callback_data=CB_ACT_DEP),
+            InlineKeyboardButton(TR_UI(context, "📰 Service Messages"), callback_data=CB_ACT_MSG),
+            InlineKeyboardButton(TR_UI(context, "🚉 Train departures"),  callback_data=CB_ACT_DEP),
         ],
         [InlineKeyboardButton(TR_UI(context, "🆕 Change Line"), callback_data=CB_BACK_MAIN)]
     ])
@@ -719,13 +694,21 @@ def line_picker_markup():
     return InlineKeyboardMarkup(rows)
 
 def lang_picker_markup():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Deutsch",      callback_data=f"{CB_LANG_PREFIX}de"),
-            InlineKeyboardButton("English",      callback_data=f"{CB_LANG_PREFIX}en"),
-            InlineKeyboardButton("Українська",   callback_data=f"{CB_LANG_PREFIX}uk"),
-        ]
-    ])
+    if ENABLE_UKRAINIAN:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Deutsch",    callback_data=f"{CB_LANG_PREFIX}de"),
+                InlineKeyboardButton("English",    callback_data=f"{CB_LANG_PREFIX}en"),
+                InlineKeyboardButton("Українська", callback_data=f"{CB_LANG_PREFIX}uk"),
+            ]
+        ])
+    else:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Deutsch", callback_data=f"{CB_LANG_PREFIX}de"),
+                InlineKeyboardButton("English", callback_data=f"{CB_LANG_PREFIX}en"),
+            ]
+        ])
 
 async def safe_send_html(message_func, text_html: str):
     try:
@@ -742,20 +725,20 @@ def short_id_for_message(msg):
     basis = f"{msg.get('id','')}-{msg.get('title','')}-{msg.get('publication','')}"
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
 
-# ================== BOT HANDLERS (Messages — без изменений) ==================
+# ================== BOT HANDLERS (Messages) ==================
 def fetch_line_messages_safe(line: str):
     data = fetch_messages()
     return filter_line_messages(data, line)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("Choose language / Sprache wählen / Оберіть мову:", reply_markup=lang_picker_markup())
+    await update.message.reply_text("Choose language / Sprache wählen:", reply_markup=lang_picker_markup())
 
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = get_user_lang(context)
     key_state = "OK" if DEEPL_AUTH_KEY else "MISSING"
     await update.message.reply_text(
-        f"Language: {cur}\nDeepL key: {key_state}\n\nChoose language / Sprache wählen / Оберіть мову:",
+        f"Language: {cur}\nDeepL key: {key_state}\n\nChoose language / Sprache wählen:",
         reply_markup=lang_picker_markup()
     )
 
@@ -808,10 +791,9 @@ async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             title_de = m.get("title", "Ohne Titel")
             pub      = m.get("publication")
-            pub_s    = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
+            pub_s    = datetime.datetime.fromtimestamp(pub/1000, timezone.utc).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
             title_shown = TR_MSG(context, title_de, is_html=True)
-
             text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "🔍 Details"), callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
             await q.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
@@ -835,7 +817,7 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title_de = m.get("title", "Ohne Titel")
     desc_de  = m.get("description", "") or ""
     pub      = m.get("publication")
-    pub_s    = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
+    pub_s    = datetime.datetime.fromtimestamp(pub/1000, timezone.utc).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
     title_out = TR_MSG(context, title_de, is_html=True)
     desc_out  = TR_MSG(context, desc_de, is_html=True)
@@ -844,7 +826,7 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_send_html(q.message.reply_text, text_html)
     await q.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
-# ================== NEW: DEPARTURES (PLAN ⊕ FCHG) ==================
+# ================== DEPARTURES (PLAN ⊕ FCHG) ==================
 async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -857,7 +839,6 @@ async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     )
 
-
 async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("await_station"):
         return
@@ -866,74 +847,66 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     station_in = update.message.text.strip()
     await update.message.reply_text(TR_UI(context, f"🔍 Searching departures for “{station_in}”..."))
 
-    # 1) пытаемся найти точное совпадение, иначе — кандидаты
-    best_exact, candidates = find_station_candidates(station_in, limit=3)
+    try:
+        best_exact, candidates = find_station_candidates(station_in, limit=3)
 
-    # точное совпадение → сразу показываем
-    if best_exact:
-        eva = best_exact["evaNumbers"][0]["number"]
-        station_name = best_exact.get("name") or station_in
-        await _send_departures_for_eva(update, context, eva, station_name)
-        return
+        if best_exact:
+            eva = best_exact["evaNumbers"][0]["number"]
+            station_name = best_exact.get("name") or station_in
+            await _send_departures_for_eva(update.message, context, eva, station_name)
+            return
 
-    # нет кандидатов вообще
-    if not candidates:
+        if not candidates:
+            await update.message.reply_text(
+                TR_UI(context, "🚫 No matching stations were found in Deutsche Bahn database."),
+                reply_markup=nav_menu(context)
+            )
+            return
+
+        rows = []
+        for s in candidates:
+            name = s.get("name", "—")
+            eva = s["evaNumbers"][0]["number"]
+            muni = s.get("municipality") or ""
+            state = s.get("federalStateCode") or ""
+            label = f"{name} ({eva})"
+            if muni or state:
+                extra = " — ".join([p for p in [muni, state] if p])
+                label = f"{name} · {extra} ({eva})"
+            rows.append([InlineKeyboardButton(label, callback_data=f"{CB_PICK_STATION}{eva}")])
+
+        rows.append([InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)])
+
         await update.message.reply_text(
-            TR_UI(context, "🚫 No matching stations were found in Deutsche Bahn database."),
-            reply_markup=nav_menu(context)
+            TR_UI(context, "Please choose the station:"),
+            reply_markup=InlineKeyboardMarkup(rows)
         )
-        return
-
-    # 2) показать пользователю кнопки с топ-3
-    rows = []
-    for s in candidates:
-        name = s.get("name", "—")
-        eva = s["evaNumbers"][0]["number"]
-        muni = s.get("municipality") or ""
-        state = s.get("federalStateCode") or ""
-        label = f"{name} ({eva})"
-        #label = f"{name}"
-        # чуть информативнее, если есть город/земля
-        if muni or state:
-            extra = " — ".join([p for p in [muni, state] if p])
-            label = f"{name} · {extra} ({eva})"
-            
-        rows.append([InlineKeyboardButton(label, callback_data=f"{CB_PICK_STATION}{eva}")])
-
-    #  добавляем Back
-    rows.append([InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)])
-
-    await update.message.reply_text(
-        TR_UI(context, "Please choose the station:"),
-        reply_markup=InlineKeyboardMarkup(rows)
-    )
+    except Exception as e:
+        await update.message.reply_text(TR_UI(context, f"⚠️ Station search error: {html.escape(str(e))}"))
+        await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
 async def on_back_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    # Сбрасывать await_station, чтобы не ловить случайный ввод текста
     context.user_data["await_station"] = False
     await q.edit_message_text(
         TR_UI(context, "Choose what to do next:"),
         reply_markup=nav_menu(context)
     )
 
-async def _send_departures_for_eva(message_or_update_msg, context, eva: int, station_name: str):
+async def _send_departures_for_eva(message_obj, context, eva: int, station_name: str):
     now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     try:
-        selected_line = context.user_data.get("line")  # "S2", если выбрано
+        selected_line = context.user_data.get("line")
         events, live_ok = get_departures_window(eva, now_local, max_items=15, selected_line=selected_line)
     except Exception as e:
-        await message_or_update_msg.reply_text(
+        await message_obj.reply_text(
             TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"),
             reply_markup=nav_menu(context)
         )
         return
 
-    if selected_line:
-        header = TR_UI(context, f"🚉 Departures from {station_name} — {selected_line}")
-    else:
-        header = TR_UI(context, f"🚉 Departures from {station_name}")
+    header = TR_UI(context, f"🚉 Departures from {station_name}" + (f" — {selected_line}" if selected_line else ""))
 
     out_lines = []
     at_txt      = TR_UI(context, " at ")
@@ -948,7 +921,6 @@ async def _send_departures_for_eva(message_or_update_msg, context, eva: int, sta
             continue
         hhmm = t.strftime("%H:%M")
 
-        # platform detail
         gleis_txt = ""
         p_old = ev.pp or ""
         p_new = ev.cp or ""
@@ -959,14 +931,12 @@ async def _send_departures_for_eva(message_or_update_msg, context, eva: int, sta
         elif p_old:
             gleis_txt = f", {platform} {p_old}"
 
-        # delay
         delay_txt = ""
         dm = ev.delay_minutes()
         if dm is not None and dm != 0:
             sign = "+" if dm > 0 else ""
             delay_txt = f", {sign}{dm}{delay_sfx}"
 
-        # cancel
         cancel_txt = f", {canceled_t}" if ev.canceled else ""
 
         dest = ev.dest or "—"
@@ -976,16 +946,16 @@ async def _send_departures_for_eva(message_or_update_msg, context, eva: int, sta
 
     if not out_lines:
         warn = TR_UI(context, "ℹ️ No departures in the next 60 minutes.")
-        await message_or_update_msg.reply_text(warn, reply_markup=nav_menu(context))
+        await message_obj.reply_text(warn, reply_markup=nav_menu(context))
         return
 
     footer = ""
     if not live_ok:
         footer = "\n\n" + TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
 
-    await safe_send_html(message_or_update_msg.reply_text, f"<b>{html.escape(header)}</b>")
-    await message_or_update_msg.reply_text("\n".join(out_lines) + footer)
-    await message_or_update_msg.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+    await safe_send_html(message_obj.reply_text, f"<b>{html.escape(header)}</b>")
+    await message_obj.reply_text("\n".join(out_lines) + footer)
+    await message_obj.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
 async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -995,12 +965,9 @@ async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     eva_str = data[len(CB_PICK_STATION):].strip()
 
-    # Попробуем получить «красивое» имя станции (маленький best-effort)
     station_name = None
     try:
-        # иногда Station Data может вернуть несколько; возьмём точное по EVA через поиск
         results = _station_search(eva_str)
-        # если API не ищет по EVA как по строке — сделаем fallback: просто поставим EVA как имя
         for s in results:
             if s.get("evaNumbers"):
                 if any(str(n.get("number")) == eva_str for n in s["evaNumbers"]):
@@ -1020,9 +987,7 @@ async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # показать отправления
     await _send_departures_for_eva(q.message, context, eva, station_name)
-
 
 # ----- Back / Change line -----
 async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1033,9 +998,9 @@ async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["lang"] = lang
     await q.edit_message_text(TR_UI(context, "🚆 Choose an S-Bahn line:"), reply_markup=line_picker_markup())
 
-# ----- TG commands support --------
+# ----- TG commands --------
 async def cmd_line(update, context):
-    # /line S2   -> установить сразу
+    # /line S2   -> set immediately
     if context.args:
         line = context.args[0].upper()
         if not line.startswith("S"):
@@ -1043,12 +1008,9 @@ async def cmd_line(update, context):
         context.user_data["line"] = line
         await update.message.reply_text(TR_UI(context, f"Line set to {line}. Choose an action:"), reply_markup=nav_menu(context))
         return
-    # без аргумента — показать пикер
     await update.message.reply_text(TR_UI(context, "🚆 Choose an S-Bahn line:"), reply_markup=line_picker_markup())
 
-
 async def cmd_messages(update, context):
-    # переиспользуем on_show_messages, но из команды
     line = context.user_data.get("line", "S2")
     try:
         msgs = fetch_line_messages_safe(line)
@@ -1066,7 +1028,7 @@ async def cmd_messages(update, context):
             context.user_data["msg_map"][mid] = m
             title_de = m.get("title", "Ohne Titel")
             pub      = m.get("publication")
-            pub_s    = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
+            pub_s    = datetime.datetime.fromtimestamp(pub/1000, timezone.utc).strftime("%d.%m.%Y %H:%M") if pub else "?"
             title_shown = TR_MSG(context, title_de, is_html=True)
             text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "🔍 Details"), callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
@@ -1077,52 +1039,28 @@ async def cmd_messages(update, context):
         await update.message.reply_text(TR_UI(context, f"⚠️ Error: {html.escape(str(e))}"))
         await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
-
-
-
 async def cmd_departures(update, context):
     if context.args:
         # /departures Erding
         update.message.text = " ".join(context.args)
-        # напрямую переиспользуем логику ввода станции
         await on_station_input(update, context)
         return
-    # без аргумента — показать prompt + Back
     context.user_data["await_station"] = True
     await update.message.reply_text(
         TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"),
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)]])
     )
-
-async def cmd_departures(update, context):
-    if context.args:
-        # /departures Erding
-        update.message.text = " ".join(context.args)
-        # напрямую переиспользуем логику ввода станции
-        await on_station_input(update, context)
-        return
-    # без аргумента — показать prompt + Back
-    context.user_data["await_station"] = True
-    await update.message.reply_text(
-        TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"),
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)]])
-    )
-
-
 
 async def cmd_lang(update, context):
     if context.args:
         lang = context.args[0].lower()
         if lang not in SUPPORTED_LANGS:
-            await update.message.reply_text("Use: /lang de|en|uk")
+            await update.message.reply_text("Use: /lang de|en")
             return
         context.user_data["lang"] = lang
         await update.message.reply_text(TR_UI(context, "Language updated. Choose what to do next:"), reply_markup=nav_menu(context))
         return
-    # без аргумента — показать пикер
-    await update.message.reply_text("Choose language / Sprache wählen / Оберіть мову:", reply_markup=lang_picker_markup())
-
-
+    await update.message.reply_text("Choose language / Sprache wählen:", reply_markup=lang_picker_markup())
 
 # ================== WIRING ==================
 if __name__ == "__main__":
@@ -1133,27 +1071,27 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("departures", cmd_departures))
-    app.add_handler(CommandHandler("departures", cmd_departures))
     app.add_handler(CommandHandler("messages", cmd_messages))
+    app.add_handler(CommandHandler("line", cmd_line))
 
     # Language picker
-    app.add_handler(CallbackQueryHandler(on_language,            pattern=r"^LANG:"))
+    app.add_handler(CallbackQueryHandler(on_language, pattern=r"^LANG:"))
 
     # Line & actions
-    app.add_handler(CallbackQueryHandler(on_line_selected,       pattern=r"^L:"))
-    app.add_handler(CallbackQueryHandler(on_show_messages,       pattern=r"^A:MSG$"))
-    app.add_handler(CallbackQueryHandler(on_departures_prompt,   pattern=r"^A:DEP$"))
-    app.add_handler(CallbackQueryHandler(on_back_main,           pattern=r"^B:MAIN$"))
-    # выбор станции из кандидатов
-    app.add_handler(CallbackQueryHandler(on_station_picked, pattern=r"^ST:"))
-    app.add_handler(CallbackQueryHandler(on_back_actions, pattern=r"^B:ACT$"))
+    app.add_handler(CallbackQueryHandler(on_line_selected,     pattern=r"^L:"))
+    app.add_handler(CallbackQueryHandler(on_show_messages,     pattern=r"^A:MSG$"))
+    app.add_handler(CallbackQueryHandler(on_departures_prompt, pattern=r"^A:DEP$"))
+    app.add_handler(CallbackQueryHandler(on_back_main,         pattern=r"^B:MAIN$"))
 
+    # Station pick / back to actions
+    app.add_handler(CallbackQueryHandler(on_station_picked, pattern=r"^ST:"))
+    app.add_handler(CallbackQueryHandler(on_back_actions,  pattern=r"^B:ACT$"))
 
     # Details
-    app.add_handler(CallbackQueryHandler(on_details,             pattern=r"^D:"))
+    app.add_handler(CallbackQueryHandler(on_details, pattern=r"^D:"))
 
     # Free text for station input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
-    app.add_handler(CommandHandler("line", cmd_line))
+
     print("✅ Bot started (polling).")
     app.run_polling()
