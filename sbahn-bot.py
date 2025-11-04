@@ -864,12 +864,14 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = s.get("name", "—")
         eva = s["evaNumbers"][0]["number"]
         muni = s.get("municipality") or ""
-        state = s.get("federalStateCode") or ""
-        label = f"{name} (EVA {eva})"
+        #state = s.get("federalStateCode") or ""
+        label = f"{name} ({eva})"
+        #label = f"{name}"
         # чуть информативнее, если есть город/земля
         if muni or state:
             extra = " — ".join([p for p in [muni, state] if p])
-            label = f"{name} · {extra} (EVA {eva})"
+            label = f"{name} · {extra} ({eva})"
+            
         rows.append([InlineKeyboardButton(label, callback_data=f"{CB_PICK_STATION}{eva}")])
 
     #  добавляем Back
