@@ -862,17 +862,25 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=nav_menu(context)
             )
             return
+        
+        # >>> добавлено: кэш имён станций по EVA
+        context.user_data["station_map"] = {}
 
         rows = []
         for s in candidates:
             name = s.get("name", "—")
             eva = s["evaNumbers"][0]["number"]
+
+            # сохраним имя для on_station_picked
+            context.user_data["station_map"][str(eva)] = name
+
             muni = s.get("municipality") or ""
             state = s.get("federalStateCode") or ""
             label = f"{name} ({eva})"
             if muni or state:
                 extra = " — ".join([p for p in [muni, state] if p])
                 label = f"{name} · {extra} ({eva})"
+
             rows.append([InlineKeyboardButton(label, callback_data=f"{CB_PICK_STATION}{eva}")])
 
         rows.append([InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)])
@@ -960,22 +968,17 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
 async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    data = q.data  # e.g. "ST:8000262"
+    data = q.data  # e.g. "ST:8001825"
     if not data.startswith(CB_PICK_STATION):
         return
     eva_str = data[len(CB_PICK_STATION):].strip()
 
-    station_name = None
-    try:
-        results = _station_search(eva_str)
-        for s in results:
-            if s.get("evaNumbers"):
-                if any(str(n.get("number")) == eva_str for n in s["evaNumbers"]):
-                    station_name = s.get("name")
-                    break
-    except Exception:
-        pass
+    # >>> новое: берем имя из кэша, куда положили в on_station_input
+    station_map = context.user_data.get("station_map") or {}
+    station_name = station_map.get(eva_str)
+
     if not station_name:
+        # запасной вариант, если кэш потерялся (долго ждали или промотали историю)
         station_name = f"EVA {eva_str}"
 
     try:
@@ -988,6 +991,7 @@ async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await _send_departures_for_eva(q.message, context, eva, station_name)
+
 
 # ----- Back / Change line -----
 async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
