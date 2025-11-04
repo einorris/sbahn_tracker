@@ -658,7 +658,7 @@ def format_departure_html(ev, context) -> str:
         hhmm_pt = ev.pt.strftime("%H:%M")
         time_html = f"<s>{hhmm_pt}</s> {hhmm_eff}"
 
-    platform_lbl = "Gleis"
+    platform_lbl = "Gl."
     p_old = ev.pp or ""
     p_new = ev.cp or ""
     if p_new and p_old and p_new != p_old:
@@ -676,7 +676,7 @@ def format_departure_html(ev, context) -> str:
         sign = "+" if dm > 0 else ""
         delay_html = f"{sign}{dm} min"
 
-    cancel_html = "Fällt aus" if ev.canceled else ""
+    cancel_html = "<b>Fällt aus</b>" if ev.canceled else ""
 
     tail_parts = [p for p in [time_html, platform_html, delay_html, cancel_html] if p]
     tail = ", ".join(tail_parts)
@@ -902,7 +902,12 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
     now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     try:
         selected_line = context.user_data.get("line")
-        events, live_ok = get_departures_window(eva, now_local, max_items=15, selected_line=selected_line)
+        events, live_ok = get_departures_window(
+            eva,
+            now_local,
+            max_items=15,
+            selected_line=selected_line
+        )
     except Exception as e:
         await message_obj.reply_text(
             TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"),
@@ -910,43 +915,19 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
         )
         return
 
-    header = TR_UI(context, f"🚉 Departures from {station_name}" + (f" — {selected_line}" if selected_line else ""))
+    # Заголовок
+    header = TR_UI(
+        context,
+        f"🚉 Departures from {station_name}" + (f" — {selected_line}" if selected_line else "")
+    )
+    await safe_send_html(message_obj.reply_text, f"<b>{html.escape(header)}</b>")
 
+    # Контент: каждая строка через HTML-форматтер (со старым зачёркнутым временем и +X)
     out_lines = []
-    at_txt      = TR_UI(context, " at ")
-    platform    = TR_UI(context, "Platform")
-    canceled_t  = TR_UI(context, "Fällt aus")
-    delay_sfx   = TR_UI(context, " min")
-    arrow       = " → "
-
     for ev in events:
-        t = ev.effective_time() or ev.pt
-        if not t:
-            continue
-        hhmm = t.strftime("%H:%M")
-
-        gleis_txt = ""
-        p_old = ev.pp or ""
-        p_new = ev.cp or ""
-        if p_new and p_old and p_new != p_old:
-            gleis_txt = f", {platform} {p_old} → {p_new}"
-        elif p_new:
-            gleis_txt = f", {platform} {p_new}"
-        elif p_old:
-            gleis_txt = f", {platform} {p_old}"
-
-        delay_txt = ""
-        dm = ev.delay_minutes()
-        if dm is not None and dm != 0:
-            sign = "+" if dm > 0 else ""
-            delay_txt = f", {sign}{dm}{delay_sfx}"
-
-        cancel_txt = f", {canceled_t}" if ev.canceled else ""
-
-        dest = ev.dest or "—"
-        line_label = ev.line_label or "S"
-
-        out_lines.append(f"{line_label}{arrow}{dest}{at_txt}{hhmm}{gleis_txt}{delay_txt}{cancel_txt}")
+        line_html = format_departure_html(ev, context)
+        if line_html:
+            out_lines.append(line_html)
 
     if not out_lines:
         warn = TR_UI(context, "ℹ️ No departures in the next 60 minutes.")
@@ -955,11 +936,17 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
 
     footer = ""
     if not live_ok:
-        footer = "\n\n" + TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
+        footer = "\n\n" + TR_UI(
+            context,
+            "⚠️ Live updates are temporarily unavailable. Showing planned times only."
+        )
 
-    await safe_send_html(message_obj.reply_text, f"<b>{html.escape(header)}</b>")
-    await message_obj.reply_text("\n".join(out_lines) + footer)
-    await message_obj.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+    await safe_send_html(message_obj.reply_text, "\n".join(out_lines) + footer)
+    await message_obj.reply_text(
+        TR_UI(context, "Choose what to do next:"),
+        reply_markup=nav_menu(context)
+    )
+
 
 async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
