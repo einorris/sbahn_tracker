@@ -794,6 +794,8 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=nav_menu(context),
         )
         return
+    else: 
+        await update.message.reply_text(TR_UI(context, f"🔍 Found {station_in} with ID:{eva}..."))
 
     now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     try:
