@@ -536,14 +536,17 @@ def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
 
         ct = _parse_time(dp.attrib.get("ct"), tz)
         cp = dp.attrib.get("cp")
-        canceled = False
-        cflag = dp.attrib.get("c") or dp.attrib.get("cn") or ""
-        if str(cflag).lower() in ("1","y","true","c","x"):
-            canceled = True
+
+        # FIX: правильная проверка отмены
+        cs = (dp.attrib.get("cs") or "").lower()   # 'c' == cancelled at this stop
+        canceled = cs in ("c", "x", "1", "true", "y")
+
+        # опционально, время фиксации отмены (необязательно выводить)
+        # clt = _parse_time(dp.attrib.get("clt"), tz)
 
         pt = _parse_time(dp.attrib.get("pt"), tz)
         pp = dp.attrib.get("pp")
-        dest = _dest_from_path(dp.attrib.get("cpth") or dp.attrib.get("ppth"))
+        dest = _dest_from_path(dp.attrib.get("cpth") or dp.attrib.get("ppth"))  
         line = _line_from_nodes(tl, dp)
 
         changes[sid] = Event(
