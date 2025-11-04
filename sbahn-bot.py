@@ -663,7 +663,7 @@ def format_departure_html(ev, context) -> str:
         time_html = ""
 
     # Платформа (Gleis X → Y)
-    platform_lbl = "Gleis"
+    platform_lbl = "Gl."
     p_old = ev.pp or ""
     p_new = ev.cp or ""
     if p_new and p_old and p_new != p_old:
