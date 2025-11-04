@@ -644,44 +644,56 @@ def get_departures_window(
     return filtered[:max_items], live_ok
 
 def format_departure_html(ev, context) -> str:
+    import html as _html
+
     line_label = ev.line_label or "S"
     dest       = ev.dest or "—"
     arrow      = " → "
 
     t_eff = ev.effective_time() or ev.pt
-    if not t_eff:
-        return f"{line_label}{arrow}{dest}"
 
-    hhmm_eff = t_eff.strftime("%H:%M")
-    time_html = hhmm_eff
-    if ev.pt and ev.ct and ev.ct != ev.pt:
-        hhmm_pt = ev.pt.strftime("%H:%M")
-        time_html = f"<s>{hhmm_pt}</s> {hhmm_eff}"
+    # Время: если ct != pt, показываем "<s>pt</s> ct"
+    if t_eff:
+        hhmm_eff = t_eff.strftime("%H:%M")
+        time_html = hhmm_eff
+        if ev.pt and ev.ct and ev.ct != ev.pt:
+            hhmm_pt = ev.pt.strftime("%H:%M")
+            time_html = f"<s>{hhmm_pt}</s> {hhmm_eff}"
+    else:
+        time_html = ""
 
-    platform_lbl = "Gl."
+    # Платформа (Gleis X → Y)
+    platform_lbl = "Gleis"
     p_old = ev.pp or ""
     p_new = ev.cp or ""
     if p_new and p_old and p_new != p_old:
-        platform_html = f"{platform_lbl} {html.escape(p_old)} → {html.escape(p_new)}"
+        platform_html = f"{platform_lbl} {_html.escape(p_old)} → {_html.escape(p_new)}"
     elif p_new:
-        platform_html = f"{platform_lbl} {html.escape(p_new)}"
+        platform_html = f"{platform_lbl} {_html.escape(p_new)}"
     elif p_old:
-        platform_html = f"{platform_lbl} {html.escape(p_old)}"
+        platform_html = f"{platform_lbl} {_html.escape(p_old)}"
     else:
         platform_html = ""
 
+    # Задержка в формате +X (без "min")
     delay_html = ""
     dm = ev.delay_minutes()
     if dm is not None and dm != 0:
         sign = "+" if dm > 0 else ""
-        delay_html = f"{sign}{dm} min"
+        delay_html = f"{sign}{dm}"
 
-    cancel_html = "<b>Fällt aus</b>" if ev.canceled else ""
+    # Собираем «тело» без текста отмены — его добавим снаружи
+    tail_parts = [p for p in [time_html, platform_html, delay_html] if p]
+    tail = (", " + ", ".join(tail_parts)) if tail_parts else ""
+    base = f"{_html.escape(line_label)}{arrow}{_html.escape(dest)}{tail}"
 
-    tail_parts = [p for p in [time_html, platform_html, delay_html, cancel_html] if p]
-    tail = ", ".join(tail_parts)
+    # Если отмена — зачеркнем всю строку и добавим "Fällt aus" вне зачёркивания
+    if ev.canceled:
+        cancel_txt = "☹️ Fällt aus"
+        return f"<s>{base}</s>  {cancel_txt}"
 
-    return f"{html.escape(line_label)}{arrow}{html.escape(dest)}, {tail}"
+    return base
+
 
 # ================== UI HELPERS ==================
 def nav_menu(context):
