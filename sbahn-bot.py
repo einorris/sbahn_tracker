@@ -54,7 +54,8 @@ SUPPORTED_LANGS = ["de", "en", "uk"]  # Deutsch, English, Українська
 DEEPL_URL = "https://api-free.deepl.com/v2/translate"
 
 def _deepl_supported_target(lang_code: str) -> str:
-    return {"de": "DE", "en": "EN", "uk": "UK"}.get(lang_code, "EN")
+    #return {"de": "DE", "en": "EN", "uk": "UK"}.get(lang_code, "EN")
+    return {"de": "DE", "en": "EN"}.get(lang_code, "EN")
 
 def deepl_translate(text: str, target_lang: str, is_html: bool) -> str:
     if not text or not DEEPL_AUTH_KEY:
@@ -217,17 +218,22 @@ def _apply_aliases(q: str) -> str:
 
 def _station_search(query: str):
     """
-    Возвращает список станций из station-data v2 для разных форматов ответа.
+    Search stations via DB Station-Data v2.
+    Handles both response shapes:
+    - top-level list
+    - dict with a list under: result/results/stations/stopPlaces
+    Tries several parameter names used across variants.
     """
     url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
-    headers = {"Accept": "application/json",
-               "DB-Client-Id": CLIENT_ID,
-               "DB-Api-Key": API_KEY_DB}
-
+    headers = {
+        "Accept": "application/json",
+        "DB-Client-Id": CLIENT_ID,
+        "DB-Api-Key": API_KEY_DB,
+    }
     param_variants = [
-        {"searchstring": query},   # StaDa docs
-        {"name": query},           # встречается в v2
-        {"searchterm": query},     # на всякий случай
+        {"searchstring": query},
+        {"name": query},
+        {"searchterm": query},
     ]
 
     for attempt in range(HTTP_RETRIES + 1):
@@ -236,19 +242,23 @@ def _station_search(query: str):
                 r = requests.get(url, headers=headers, params=params, timeout=HTTP_TIMEOUT)
                 if r.status_code != 200:
                     continue
-                data = r.json()
+                try:
+                    data = r.json()
+                except Exception:
+                    continue
+
                 if isinstance(data, list):
                     return data
                 if isinstance(data, dict):
                     for key in ("result", "results", "stations", "stopPlaces", "stopplaces"):
-                        if isinstance(data.get(key), list):
-                            return data[key]
+                        val = data.get(key)
+                        if isinstance(val, list):
+                            return val
             except Exception:
                 pass
         if attempt < HTTP_RETRIES:
             time.sleep(0.3 * (2 ** attempt))
     return []
-
 def _pick_best_station(results, query_norm: str):
     best = None; best_score = -1
     for s in results:
