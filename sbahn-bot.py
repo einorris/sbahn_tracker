@@ -1052,24 +1052,8 @@ async def cmd_messages(update, context):
         await update.message.reply_text(TR_UI(context, f"⚠️ Error: {html.escape(str(e))}"))
         await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
 
-app.add_handler(CommandHandler("messages", cmd_messages))
 
 
-async def cmd_departures(update, context):
-    if context.args:
-        # /departures Erding
-        update.message.text = " ".join(context.args)
-        # напрямую переиспользуем логику ввода станции
-        await on_station_input(update, context)
-        return
-    # без аргумента — показать prompt + Back
-    context.user_data["await_station"] = True
-    await update.message.reply_text(
-        TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"),
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)]])
-    )
-
-app.add_handler(CommandHandler("departures", cmd_departures))
 
 async def cmd_departures(update, context):
     if context.args:
@@ -1085,7 +1069,20 @@ async def cmd_departures(update, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)]])
     )
 
-app.add_handler(CommandHandler("departures", cmd_departures))
+async def cmd_departures(update, context):
+    if context.args:
+        # /departures Erding
+        update.message.text = " ".join(context.args)
+        # напрямую переиспользуем логику ввода станции
+        await on_station_input(update, context)
+        return
+    # без аргумента — показать prompt + Back
+    context.user_data["await_station"] = True
+    await update.message.reply_text(
+        TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)]])
+    )
+
 
 
 async def cmd_lang(update, context):
@@ -1100,8 +1097,6 @@ async def cmd_lang(update, context):
     # без аргумента — показать пикер
     await update.message.reply_text("Choose language / Sprache wählen / Оберіть мову:", reply_markup=lang_picker_markup())
 
-# у тебя уже был Handler для /lang — просто замени на этот вариант:
-app.add_handler(CommandHandler("lang", cmd_lang))
 
 
 # ================== WIRING ==================
@@ -1111,7 +1106,10 @@ if __name__ == "__main__":
 
     # Commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("lang",  cmd_lang))
+    app.add_handler(CommandHandler("lang", cmd_lang))
+    app.add_handler(CommandHandler("departures", cmd_departures))
+    app.add_handler(CommandHandler("departures", cmd_departures))
+    app.add_handler(CommandHandler("messages", cmd_messages))
 
     # Language picker
     app.add_handler(CallbackQueryHandler(on_language,            pattern=r"^LANG:"))
@@ -1131,6 +1129,6 @@ if __name__ == "__main__":
 
     # Free text for station input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
-
+    app.add_handler(CommandHandler("line", cmd_line))
     print("✅ Bot started (polling).")
     app.run_polling()
