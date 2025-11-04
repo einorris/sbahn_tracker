@@ -159,7 +159,7 @@ def _apply_aliases(q: str) -> str:
 
         "karlsplatz": "München Karlsplatz (Stachus)",
         "stachus": "München Karlsplatz (Stachus)",
-        "karlsplatz (stachus)": "München Karlsplatz (Stachus)",
+        "karlsplatz (stachus)": "Мünchen Karlsplatz (Stachus)",
 
         "isartor": "München Isartor",
         "rosenheimer platz": "München Rosenheimer Platz",
@@ -197,7 +197,7 @@ def _apply_aliases(q: str) -> str:
         "feldmoching": "München-Feldmoching",
         "moosach": "München-Moosach",
         "oberwiesenfeld": "Oberwiesenfeld",
-        "unterföhring": "Unterföhring",
+        "unterföhring": "Unterföhrинг",
         "unterfoehring": "Unterföhring",
         "ismaning": "Ismaning",
 
@@ -206,7 +206,7 @@ def _apply_aliases(q: str) -> str:
         "airport": "München Flughafen Terminal",
         "muc": "München Flughafen Terminal",
         "flughafen münchen": "München Flughafen Terminal",
-        "flughafen muenchen": "München Flughafen Terminal",
+        "flughafen muenchen": "Мünchen Flughafen Terminal",
         "visitor park": "München Flughafen Besucherpark",
         "besucherpark": "München Flughafen Besucherpark",
 
@@ -215,7 +215,7 @@ def _apply_aliases(q: str) -> str:
         "altenerding": "Altenerding",
         "aufhausen (oberbay)": "Aufhausen (Oberbay)",
         "markt schwaben": "Markt Schwaben",
-        "grub (oberbay)": "Grub (Oberbay)",
+        "grub (oberbay)": "Grub (Оberbay)",
         "heimstetten": "Heimstetten",
         "daglfing": "München-Daglfing",
         "englschalking": "München-Englschalking",
@@ -408,16 +408,21 @@ class Event:
 PLAN_CACHE: Dict[Tuple[int,str,str], Tuple[float,List[Event]]] = {}
 
 def _requests_get(url: str, headers: dict) -> Optional[str]:
+    """
+    GET with simple retries on network errors and non-200 responses.
+    """
     for attempt in range(HTTP_RETRIES + 1):
         try:
             r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-            if r.status_code != 200:
-                return None
-            return r.text
+            if r.status_code == 200:
+                return r.text
+            # backoff on non-200 too
         except Exception:
-            if attempt == HTTP_RETRIES:
-                return None
+            # network error -> retry below
+            pass
+        if attempt < HTTP_RETRIES:
             time.sleep(0.3 * (2**attempt))
+    return None
 
 def _parse_time(code: Optional[str], tz: ZoneInfo) -> Optional[datetime.datetime]:
     if not code or len(code) < 10:
@@ -511,6 +516,10 @@ def fetch_plan(eva: int, date: str, hour: str, tz: ZoneInfo) -> List[Event]:
     return events
 
 def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
+    """
+    Parse FULL changes. Do NOT require <tl>. Many fchg nodes omit it.
+    Only consider departures (<dp>) for our departures list.
+    """
     headers = {"Accept": "application/xml","DB-Client-Id": CLIENT_ID,"DB-Api-Key": API_KEY_DB}
     url = f"{DB_BASE}/fchg/{eva}"
     xml_text = _requests_get(url, headers)
@@ -526,27 +535,28 @@ def fetch_fchg(eva: int, tz: ZoneInfo) -> Dict[str, Event]:
         sid = s.attrib.get("id")
         if not sid:
             continue
-        tl = s.find("tl")
-        if tl is None or (tl.attrib.get("c") or "").upper() != "S":
-            continue
 
+        # we don't require <tl> here
+        tl = s.find("tl")
         dp = s.find("dp")
         if dp is None:
+            # changes only for arrival -> skip for departures use-case
             continue
 
         ct = _parse_time(dp.attrib.get("ct"), tz)
         cp = dp.attrib.get("cp")
 
-        # FIX: правильная проверка отмены
-        cs = (dp.attrib.get("cs") or "").lower()   # 'c' == cancelled at this stop
+        # cancellation flag at this stop
+        cs = (dp.attrib.get("cs") or "").lower()   # 'c' means cancelled at stop
         canceled = cs in ("c", "x", "1", "true", "y")
-
-        # опционально, время фиксации отмены (необязательно выводить)
-        # clt = _parse_time(dp.attrib.get("clt"), tz)
 
         pt = _parse_time(dp.attrib.get("pt"), tz)
         pp = dp.attrib.get("pp")
-        dest = _dest_from_path(dp.attrib.get("cpth") or dp.attrib.get("ppth"))  
+        # prefer cpth, but if it's empty, fallback to ppth from plan semantics
+        cpth = dp.attrib.get("cpth")
+        ppth = dp.attrib.get("ppth")
+        dest = _dest_from_path(cpth if cpth is not None and cpth != "" else ppth)
+
         line = _line_from_nodes(tl, dp)
 
         changes[sid] = Event(
@@ -578,6 +588,7 @@ def merge_plan_with_changes(plan: List[Event], changes: Dict[str, Event]) -> Lis
             base.raw_tl.update(ch.raw_tl)
             base.raw_node_attrs.update(ch.raw_node_attrs)
         else:
+            # ad-hoc dep that wasn't in plan
             by_id[sid] = ch
     return list(by_id.values())
 
