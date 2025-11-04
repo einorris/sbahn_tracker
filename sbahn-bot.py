@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 from datetime import timezone, timedelta
 from zoneinfo import ZoneInfo
-
+from telegram.ext import CommandHandler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -1006,6 +1006,103 @@ async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["lang"] = lang
     await q.edit_message_text(TR_UI(context, "🚆 Choose an S-Bahn line:"), reply_markup=line_picker_markup())
+
+# ----- TG commands support --------
+async def cmd_line(update, context):
+    # /line S2   -> установить сразу
+    if context.args:
+        line = context.args[0].upper()
+        if not line.startswith("S"):
+            line = "S" + line
+        context.user_data["line"] = line
+        await update.message.reply_text(TR_UI(context, f"Line set to {line}. Choose an action:"), reply_markup=nav_menu(context))
+        return
+    # без аргумента — показать пикер
+    await update.message.reply_text(TR_UI(context, "🚆 Choose an S-Bahn line:"), reply_markup=line_picker_markup())
+
+app.add_handler(CommandHandler("line", cmd_line))
+
+async def cmd_messages(update, context):
+    # переиспользуем on_show_messages, но из команды
+    line = context.user_data.get("line", "S2")
+    try:
+        msgs = fetch_line_messages_safe(line)
+        context.user_data["msg_map"] = {}
+
+        if not msgs:
+            await update.message.reply_text(TR_UI(context, f"No current messages for {line}."))
+            await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+            return
+
+        await update.message.reply_text(TR_UI(context, f"📰 Service Messages for {line}"), parse_mode="HTML")
+
+        for m in msgs:
+            mid = short_id_for_message(m)
+            context.user_data["msg_map"][mid] = m
+            title_de = m.get("title", "Ohne Titel")
+            pub      = m.get("publication")
+            pub_s    = datetime.datetime.fromtimestamp(pub/1000, datetime.UTC).strftime("%d.%m.%Y %H:%M") if pub else "?"
+            title_shown = TR_MSG(context, title_de, is_html=True)
+            text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "🔍 Details"), callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+        await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+    except Exception as e:
+        await update.message.reply_text(TR_UI(context, f"⚠️ Error: {html.escape(str(e))}"))
+        await update.message.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+
+app.add_handler(CommandHandler("messages", cmd_messages))
+
+
+async def cmd_departures(update, context):
+    if context.args:
+        # /departures Erding
+        update.message.text = " ".join(context.args)
+        # напрямую переиспользуем логику ввода станции
+        await on_station_input(update, context)
+        return
+    # без аргумента — показать prompt + Back
+    context.user_data["await_station"] = True
+    await update.message.reply_text(
+        TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)]])
+    )
+
+app.add_handler(CommandHandler("departures", cmd_departures))
+
+async def cmd_departures(update, context):
+    if context.args:
+        # /departures Erding
+        update.message.text = " ".join(context.args)
+        # напрямую переиспользуем логику ввода станции
+        await on_station_input(update, context)
+        return
+    # без аргумента — показать prompt + Back
+    context.user_data["await_station"] = True
+    await update.message.reply_text(
+        TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)]])
+    )
+
+app.add_handler(CommandHandler("departures", cmd_departures))
+
+
+async def cmd_lang(update, context):
+    if context.args:
+        lang = context.args[0].lower()
+        if lang not in SUPPORTED_LANGS:
+            await update.message.reply_text("Use: /lang de|en|uk")
+            return
+        context.user_data["lang"] = lang
+        await update.message.reply_text(TR_UI(context, "Language updated. Choose what to do next:"), reply_markup=nav_menu(context))
+        return
+    # без аргумента — показать пикер
+    await update.message.reply_text("Choose language / Sprache wählen / Оберіть мову:", reply_markup=lang_picker_markup())
+
+# у тебя уже был Handler для /lang — просто замени на этот вариант:
+app.add_handler(CommandHandler("lang", cmd_lang))
+
 
 # ================== WIRING ==================
 if __name__ == "__main__":
