@@ -44,6 +44,9 @@ CB_ACT_MSG       = "A:MSG"
 CB_ACT_DEP       = "A:DEP"
 CB_BACK_MAIN     = "B:MAIN"
 CB_DETAIL_PREFIX = "D:"
+CB_PICK_STATION = "ST:"   # выбор конкретной станции из списка кандидатов
+CB_BACK_ACTIONS = "B:ACT"   # вернуться к меню Actions (Show Messages / Show Departures)
+
 
 SUPPORTED_LANGS = ["de", "en", "uk"]  # Deutsch, English, Українська
 
@@ -243,6 +246,68 @@ def _pick_best_station(results, query_norm: str):
         if score > best_score:
             best = s; best_score = score
     return best
+def rank_stations(results, query_norm: str):
+    """Вернёт [(station_obj, score), ...] по убыванию score."""
+    ranked = []
+    for s in results:
+        if not s.get("evaNumbers"):
+            continue
+        name = s.get("name", "")
+        nn = _norm(name)
+        score = 0
+        if nn == query_norm:
+            score += 100
+        if nn.startswith(query_norm) or query_norm.startswith(nn):
+            score += 50
+        if query_norm in nn:
+            score += 25
+        if s.get("federalStateCode") == "DE-BY":
+            score += 5
+        ranked.append((s, score))
+    ranked.sort(key=lambda t: t[1], reverse=True)
+    return ranked
+
+def find_station_candidates(user_input: str, limit: int = 3):
+    """
+    Возвращает (best_exact_match: dict|None, candidates: List[dict])
+    best_exact_match — объект станции при точном совпадении (score >= 100 и nn == query_norm),
+    candidates — до 3 лучших кандидатов (без жесткой фильтрации по score).
+    """
+    primary = _apply_aliases(user_input)
+    qn = _norm(primary)
+
+    # 1) как ввели
+    results = _station_search(primary)
+    ranked = rank_stations(results, qn)
+
+    # точное совпадение?
+    if ranked and ranked[0][1] >= 100:
+        top_station = ranked[0][0]
+        nn = _norm(top_station.get("name", ""))
+        if nn == qn:
+            return top_station, []
+
+    # 2) *...*
+    if not ranked:
+        wildcard = f"*{user_input}*"
+        results = _station_search(wildcard)
+        ranked = rank_stations(results, _norm(user_input))
+
+    # 3) München*... / Muenchen*...
+    if not ranked:
+        for variant in (f"München*{user_input}*", f"Muenchen*{user_input}*"):
+            results = _station_search(variant)
+            ranked = rank_stations(results, _norm(variant.replace("*", " ")))
+            if ranked:
+                break
+
+    # если всё равно пусто
+    if not ranked:
+        return None, []
+
+    # вернём до 3-х
+    candidates = [s for (s, _) in ranked[:limit]]
+    return None, candidates
 
 def get_station_id_and_name(station_query: str) -> Tuple[Optional[int], Optional[str]]:
     primary = _apply_aliases(station_query)
@@ -758,138 +823,177 @@ async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     q = update.callback_query
     await q.answer()
     context.user_data["await_station"] = True
-    await q.edit_message_text(TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"))
+
+    await q.edit_message_text(
+        TR_UI(context, "Please enter the station name (e.g., Erding or Ostbahnhof):"),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)]]
+        )
+    )
+
 
 async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает ввод станции пользователем:
-    - резолвит название в evaNo (допускает прямой ввод EVA: '8000261')
-    - тянет /plan (2 часа) + /fchg
-    - мержит, фильтрует окно [now-5m; now+60m], сортирует
-    - выводит до 15 отправлений с зачёркнутым pt при отличии от ct
-    """
     if not context.user_data.get("await_station"):
         return
     context.user_data["await_station"] = False
 
-    station_in = (update.message.text or "").strip()
-    await update.message.reply_text(TR_UI(context, f"🔍 Searching departures for {station_in}..."))
+    station_in = update.message.text.strip()
+    await update.message.reply_text(TR_UI(context, f"🔍 Searching departures for “{station_in}”..."))
 
-    # --- Разрешаем прямой ввод EVA числами ---
-    eva: Optional[int] = None
-    station_name: Optional[str] = None
-    if station_in.isdigit():
-        try:
-            eva = int(station_in)
-            station_name = station_in
-        except Exception:
-            eva = None
+    # 1) пытаемся найти точное совпадение, иначе — кандидаты
+    best_exact, candidates = find_station_candidates(station_in, limit=3)
 
-    if not eva:
-        eva, station_name = get_station_id_and_name(station_in)
+    # точное совпадение → сразу показываем
+    if best_exact:
+        eva = best_exact["evaNumbers"][0]["number"]
+        station_name = best_exact.get("name") or station_in
+        await _send_departures_for_eva(update, context, eva, station_name)
+        return
 
-    if not eva:
+    # нет кандидатов вообще
+    if not candidates:
         await update.message.reply_text(
-            TR_UI(context, "🚫 Station not found in Deutsche Bahn database."),
-            reply_markup=nav_menu(context),
+            TR_UI(context, "🚫 No matching stations were found in Deutsche Bahn database."),
+            reply_markup=nav_menu(context)
         )
         return
-    else: 
-        await update.message.reply_text(TR_UI(context, f"🔍 Found {station_in} with ID:{eva}..."))
 
+    # 2) показать пользователю кнопки с топ-3
+    rows = []
+    for s in candidates:
+        name = s.get("name", "—")
+        eva = s["evaNumbers"][0]["number"]
+        muni = s.get("municipality") or ""
+        state = s.get("federalStateCode") or ""
+        label = f"{name} (EVA {eva})"
+        # чуть информативнее, если есть город/земля
+        if muni or state:
+            extra = " — ".join([p for p in [muni, state] if p])
+            label = f"{name} · {extra} (EVA {eva})"
+        rows.append([InlineKeyboardButton(label, callback_data=f"{CB_PICK_STATION}{eva}")])
+
+    #  добавляем Back
+    rows.append([InlineKeyboardButton(TR_UI(context, "⬅️ Back"), callback_data=CB_BACK_ACTIONS)])
+
+    await update.message.reply_text(
+        TR_UI(context, "Please choose the station:"),
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+async def on_back_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    # Сбрасывать await_station, чтобы не ловить случайный ввод текста
+    context.user_data["await_station"] = False
+    await q.edit_message_text(
+        TR_UI(context, "Choose what to do next:"),
+        reply_markup=nav_menu(context)
+    )
+
+async def _send_departures_for_eva(message_or_update_msg, context, eva: int, station_name: str):
     now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     try:
-        selected_line = context.user_data.get("line")  # например, "S2"
-        events, live_ok = get_departures_window(
-            eva=eva,
-            now_local=now_local,
-            max_items=15,
-            selected_line=selected_line
-        )
+        selected_line = context.user_data.get("line")  # "S2", если выбрано
+        events, live_ok = get_departures_window(eva, now_local, max_items=15, selected_line=selected_line)
     except Exception as e:
-        await update.message.reply_text(
+        await message_or_update_msg.reply_text(
             TR_UI(context, f"⚠️ Error while fetching timetable: {str(e)}"),
-            reply_markup=nav_menu(context),
+            reply_markup=nav_menu(context)
         )
         return
 
-    # --- Заголовок ---
     if selected_line:
         header = TR_UI(context, f"🚉 Departures from {station_name} — {selected_line}")
     else:
         header = TR_UI(context, f"🚉 Departures from {station_name}")
 
-    # --- Форматирование строк (HTML) ---
-    out_lines_html: List[str] = []
+    out_lines = []
     at_txt      = TR_UI(context, " at ")
     platform    = TR_UI(context, "Platform")
-    canceled_t  = TR_UI(context, "Fällt aus")  # оставляем DE-формулировку как стандарт для DE UX; переводится при др. языке
+    canceled_t  = TR_UI(context, "Fällt aus")
     delay_sfx   = TR_UI(context, " min")
     arrow       = " → "
 
     for ev in events:
-        t_eff = ev.effective_time() or ev.pt
-        if not t_eff:
+        t = ev.effective_time() or ev.pt
+        if not t:
             continue
+        hhmm = t.strftime("%H:%M")
 
-        # Время: если есть ct и он отличается от pt — показываем pt зачёркнутым, затем ct
-        hhmm_eff = t_eff.strftime("%H:%M")
-        time_html = html.escape(hhmm_eff)
-        if ev.pt and ev.ct and ev.ct != ev.pt:
-            pt_str = ev.pt.strftime("%H:%M")
-            time_html = f"<s>{html.escape(pt_str)}</s> {html.escape(hhmm_eff)}"
-
-        # Платформа (учитываем смену pp -> cp)
+        # platform detail
         gleis_txt = ""
         p_old = ev.pp or ""
         p_new = ev.cp or ""
         if p_new and p_old and p_new != p_old:
-            gleis_txt = f", {platform} {html.escape(p_old)} → {html.escape(p_new)}"
+            gleis_txt = f", {platform} {p_old} → {p_new}"
         elif p_new:
-            gleis_txt = f", {platform} {html.escape(p_new)}"
+            gleis_txt = f", {platform} {p_new}"
         elif p_old:
-            gleis_txt = f", {platform} {html.escape(p_old)}"
+            gleis_txt = f", {platform} {p_old}"
 
-        # Задержка (+N мин), если ct и pt заданы и различаются
+        # delay
         delay_txt = ""
         dm = ev.delay_minutes()
         if dm is not None and dm != 0:
             sign = "+" if dm > 0 else ""
             delay_txt = f", {sign}{dm}{delay_sfx}"
 
-        # Отмена
+        # cancel
         cancel_txt = f", {canceled_t}" if ev.canceled else ""
 
-        # Направление/линия
-        dest = html.escape(ev.dest or "—")
-        line_label = html.escape(ev.line_label or "S")
+        dest = ev.dest or "—"
+        line_label = ev.line_label or "S"
 
-        out_lines_html.append(
-            f"{line_label}{arrow}{dest}{at_txt}{time_html}{gleis_txt}{delay_txt}{cancel_txt}"
-        )
+        out_lines.append(f"{line_label}{arrow}{dest}{at_txt}{hhmm}{gleis_txt}{delay_txt}{cancel_txt}")
 
-    if not out_lines_html:
+    if not out_lines:
         warn = TR_UI(context, "ℹ️ No departures in the next 60 minutes.")
-        await update.message.reply_text(warn, reply_markup=nav_menu(context))
+        await message_or_update_msg.reply_text(warn, reply_markup=nav_menu(context))
         return
 
-    body_html = "<br>".join(out_lines_html)
-    footer_html = ""
+    footer = ""
     if not live_ok:
-        footer_html = "<br><br>" + html.escape(
-            TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
+        footer = "\n\n" + TR_UI(context, "⚠️ Live updates are temporarily unavailable. Showing planned times only.")
+
+    await safe_send_html(message_or_update_msg.reply_text, f"<b>{html.escape(header)}</b>")
+    await message_or_update_msg.reply_text("\n".join(out_lines) + footer)
+    await message_or_update_msg.reply_text(TR_UI(context, "Choose what to do next:"), reply_markup=nav_menu(context))
+
+async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data  # e.g. "ST:8000262"
+    if not data.startswith(CB_PICK_STATION):
+        return
+    eva_str = data[len(CB_PICK_STATION):].strip()
+
+    # Попробуем получить «красивое» имя станции (маленький best-effort)
+    station_name = None
+    try:
+        # иногда Station Data может вернуть несколько; возьмём точное по EVA через поиск
+        results = _station_search(eva_str)
+        # если API не ищет по EVA как по строке — сделаем fallback: просто поставим EVA как имя
+        for s in results:
+            if s.get("evaNumbers"):
+                if any(str(n.get("number")) == eva_str for n in s["evaNumbers"]):
+                    station_name = s.get("name")
+                    break
+    except Exception:
+        pass
+    if not station_name:
+        station_name = f"EVA {eva_str}"
+
+    try:
+        eva = int(eva_str)
+    except ValueError:
+        await q.message.reply_text(
+            TR_UI(context, "⚠️ Invalid station identifier."),
+            reply_markup=nav_menu(context)
         )
+        return
 
-    # --- Отправка ответа (HTML-безопасно) ---
-    await safe_send_html(update.message.reply_text, f"<b>{html.escape(header)}</b>")
-    await safe_send_html(update.message.reply_text, body_html + footer_html)
-
-    # Навигация
-    await update.message.reply_text(
-        TR_UI(context, "Choose what to do next:"),
-        reply_markup=nav_menu(context)
-    )
-
+    # показать отправления
+    await _send_departures_for_eva(q.message, context, eva, station_name)
 
 
 # ----- Back / Change line -----
@@ -918,6 +1022,10 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(on_show_messages,       pattern=r"^A:MSG$"))
     app.add_handler(CallbackQueryHandler(on_departures_prompt,   pattern=r"^A:DEP$"))
     app.add_handler(CallbackQueryHandler(on_back_main,           pattern=r"^B:MAIN$"))
+    # выбор станции из кандидатов
+    app.add_handler(CallbackQueryHandler(on_station_picked, pattern=r"^ST:"))
+    app.add_handler(CallbackQueryHandler(on_back_actions, pattern=r"^B:ACT$"))
+
 
     # Details
     app.add_handler(CallbackQueryHandler(on_details,             pattern=r"^D:"))
