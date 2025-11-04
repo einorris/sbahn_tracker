@@ -216,22 +216,38 @@ def _apply_aliases(q: str) -> str:
     return aliases.get(qn, q)
 
 def _station_search(query: str):
+    """
+    Возвращает список станций из station-data v2 для разных форматов ответа.
+    """
     url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
-    headers = {
-        "Accept": "application/json",
-        "DB-Client-Id": CLIENT_ID,
-        "DB-Api-Key": API_KEY_DB,
-    }
+    headers = {"Accept": "application/json",
+               "DB-Client-Id": CLIENT_ID,
+               "DB-Api-Key": API_KEY_DB}
+
+    param_variants = [
+        {"searchstring": query},   # StaDa docs
+        {"name": query},           # встречается в v2
+        {"searchterm": query},     # на всякий случай
+    ]
+
     for attempt in range(HTTP_RETRIES + 1):
-        try:
-            r = requests.get(url, headers=headers, params={"searchstring": query}, timeout=HTTP_TIMEOUT)
-            if r.status_code != 200:
-                return []
-            return r.json().get("result", []) or []
-        except Exception:
-            if attempt == HTTP_RETRIES:
-                return []
-            time.sleep(0.3 * (2**attempt))
+        for params in param_variants:
+            try:
+                r = requests.get(url, headers=headers, params=params, timeout=HTTP_TIMEOUT)
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    for key in ("result", "results", "stations", "stopPlaces", "stopplaces"):
+                        if isinstance(data.get(key), list):
+                            return data[key]
+            except Exception:
+                pass
+        if attempt < HTTP_RETRIES:
+            time.sleep(0.3 * (2 ** attempt))
+    return []
 
 def _pick_best_station(results, query_norm: str):
     best = None; best_score = -1
@@ -864,7 +880,7 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = s.get("name", "—")
         eva = s["evaNumbers"][0]["number"]
         muni = s.get("municipality") or ""
-        #state = s.get("federalStateCode") or ""
+        state = s.get("federalStateCode") or ""
         label = f"{name} ({eva})"
         #label = f"{name}"
         # чуть информативнее, если есть город/земля
