@@ -839,9 +839,9 @@ async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = "en"
     context.user_data["lang"] = lang
 
-    await q.edit_message_text(T(context, "choose_line"))
+    #await q.edit_message_text(T(context, "choose_line"))
     #await q.message.reply_text(T(context, "tip_lang"))
-    await q.message.reply_text(T(context, "lines"), reply_markup=line_picker_markup(context))
+    await q.message.reply_text(T(context, "choose_line"), reply_markup=line_picker_markup(context))
 
 async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
