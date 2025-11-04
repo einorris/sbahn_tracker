@@ -26,6 +26,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.ext import JobQueue
 from telegram.error import BadRequest, Forbidden
 
 # ================== CONFIG ==================
@@ -799,13 +800,25 @@ async def _autodelete_job(context: ContextTypes.DEFAULT_TYPE):
 def schedule_autodelete(context: ContextTypes.DEFAULT_TYPE, message):
     if AUTO_DELETE_SECONDS <= 0 or message is None:
         return
+
+    # Пытаемся взять job_queue из контекста, если там пусто — из приложения
+    jq = getattr(context, "job_queue", None)
+    if jq is None:
+        app = getattr(context, "application", None)
+        jq = getattr(app, "job_queue", None) if app else None
+
+    # Если и тут пусто — просто выходим без аварии
+    if jq is None:
+        return
+
     when = datetime.timedelta(seconds=AUTO_DELETE_SECONDS)
-    context.job_queue.run_once(
+    jq.run_once(
         _autodelete_job,
         when=when,
         data={"chat_id": message.chat_id, "message_id": message.message_id},
         name=f"autodel:{message.chat_id}:{message.message_id}",
     )
+
 
 async def safe_send_html(message_func, text_html: str):
     try:
@@ -1178,8 +1191,12 @@ async def cmd_lang(update, context):
 # ================== WIRING ==================
 if __name__ == "__main__":
     print("🚀 Bot starting (polling)...")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
+    app = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .job_queue(JobQueue())   # <- вот это не даст job_queue быть None
+    .build()
+)
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("lang", cmd_lang))
