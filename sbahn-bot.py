@@ -303,14 +303,15 @@ def _apply_aliases(q: str) -> str:
         "riem": "München-Riem",
 
         # Airport
-        "munich airport": "München Flughafen Terminal",
-        "airport": "München Flughafen Terminal",
-        "muc": "Мünchen Flughafen Terminal",
-        "flughafen münchen": "München Flughafen Terminal",
-        "flughafen": "München Flughafen Terminal",
-        "flughafen muenchen": "München Flughafen Terminal",
+        "munich airport": "Flughafen München",
+        "airport": "Flughafen München",
+        "muc": "Flughafen München",
+        "flughafen münchen": "Flughafen München",
+        "flughafen": "Flughafen München",
+        "flughafen muenchen": "Flughafen München",
         "visitor park": "München Flughafen Besucherpark",
         "besucherpark": "München Flughafen Besucherpark",
+        "Flughafen besucherpark": "München Flughafen Besucherpark",
 
         # S2 to Erding
         "erding": "Erding",
