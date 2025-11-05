@@ -29,17 +29,6 @@ from telegram.ext import (
 from telegram.error import BadRequest
 
 # ================== CONFIG ==================
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-FEEDBACK_SALT = os.getenv("FEEDBACK_SALT", "")
-
-def _anon_id(user_id: int) -> str:
-    try:
-        base = f"{user_id}:{FEEDBACK_SALT}"
-        import hashlib as _hl
-        return _hl.sha256(base.encode("utf-8")).hexdigest()[:10]
-    except Exception:
-        return "anonymous"
-
 BOT_TOKEN   = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
 CLIENT_ID   = os.getenv("DB_CLIENT_ID") or "YOUR_DB_CLIENT_ID"
 API_KEY_DB  = os.getenv("DB_API_KEY")  or "YOUR_DB_API_KEY"
@@ -49,7 +38,10 @@ MVG_URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
 DB_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
 
 HTTP_TIMEOUT = 5   # seconds
-HTTP_RETRIES = 2   # additional attempts (1 + 2)
+HTTP_RETRIES = 2
+STATION_SEARCH_DEADLINE_SEC = 7  # hard cap per station search
+STATION_HTTP_TIMEOUT = 3         # tighter timeout for station lookup
+   # additional attempts (1 + 2)
 
 # Short, safe callback keys
 CB_LANG_PREFIX   = "LANG:"    # LANG:de / LANG:en / LANG:uk / ...
@@ -71,11 +63,6 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "choose_line": "Choose an S-Bahn line:",
         "lines": "Lines:",
         "you_selected_line": "You selected {line}. Choose an action:",
-        "btn_cancel_feedback": "✖️ Cancel",
-        "feedback_prompt": "Tell me what didn’t work or what to improve. I’ll pass it on anonymously. Send your message now, or press Cancel.",
-        "feedback_thanks": "Thanks! Your feedback was delivered anonymously.",
-        "feedback_unavailable": "Feedback destination is not configured. Please try later.",
-        "feedback_cancelled": "Feedback canceled.",
         "actions": "Actions:",
         "btn_service_messages": "🚧 Disruptions & messages",
         "btn_train_departures": "🚉 Train departures (by station)",
@@ -112,11 +99,6 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "choose_line": "S-Bahn-Linie auswählen:",
         "lines": "Linien:",
         "you_selected_line": "Du hast {line} gewählt. Aktion auswählen:",
-        "btn_cancel_feedback": "✖️ Abbrechen",
-        "feedback_prompt": "Was hat nicht geklappt oder was können wir verbessern? Die Nachricht wird anonym weitergeleitet. Jetzt schreiben oder Abbrechen drücken.",
-        "feedback_thanks": "Danke! Dein Feedback wurde anonym übermittelt.",
-        "feedback_unavailable": "Feedback-Ziel ist nicht konfiguriert. Bitte später erneut versuchen.",
-        "feedback_cancelled": "Feedback abgebrochen.",
         "actions": "Aktionen:",
         "btn_service_messages": "🚧 Störungen & Meldungen",
         "btn_train_departures": "🚉 Abfahrten (nach Station)",
@@ -153,11 +135,6 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "choose_line": "Оберіть лінію S-Bahn:",
         "lines": "Лінії:",
         "you_selected_line": "Ви обрали {line}. Оберіть дію:",
-        "btn_cancel_feedback": "✖️ Скасувати",
-        "feedback_prompt": "Що не спрацювало або що можна покращити? Повідомлення буде надіслано анонімно. Надішліть його зараз або натисніть Скасувати.",
-        "feedback_thanks": "Дякуємо! Ваш відгук надіслано анонімно.",
-        "feedback_unavailable": "Місце призначення для відгуків не налаштовано. Спробуйте пізніше.",
-        "feedback_cancelled": "Відгук скасовано.",
         "actions": "Дії:",
         "btn_service_messages": "🚧 Несправності та оголошення",
         "btn_train_departures": "🚉 Відправлення (за станцією)",
@@ -347,9 +324,11 @@ def _apply_aliases(q: str) -> str:
 
 def _station_search(query: str):
     """
-    Search stations via DB Station-Data v2.
-    Supports response as list or as dict under result/results/stations/stopPlaces.
-    Tries several parameter names. Filters to Bavaria (federalStateCode == "DE-BY").
+    Station search with two controlled variants:
+      1) exact searchstring
+      2) city-prefix wildcard: München*{query}* and Muenchen*{query}*
+    Always filters DE-BY and stations having evaNumbers.
+    Hard overall deadline + tighter per-request timeout to avoid hangs.
     """
     url = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2/stations"
     headers = {
@@ -357,47 +336,52 @@ def _station_search(query: str):
         "DB-Client-Id": CLIENT_ID,
         "DB-Api-Key": API_KEY_DB,
     }
-    param_variants = [
+    start = time.monotonic()
+    variants = [
         {"searchstring": query},
-        {"name": query},
-        {"searchterm": query},
+        {"searchstring": f"München*{query}*"},
+        {"searchstring": f"Muenchen*{query}*"},
     ]
-
-    for attempt in range(HTTP_RETRIES + 1):
-        for params in param_variants:
+    out = []
+    for params in variants:
+        if time.monotonic() - start > STATION_SEARCH_DEADLINE_SEC:
+            break
+        for attempt in range(HTTP_RETRIES + 1):
+            if time.monotonic() - start > STATION_SEARCH_DEADLINE_SEC:
+                break
             try:
-                r = requests.get(url, headers=headers, params=params, timeout=HTTP_TIMEOUT)
+                r = requests.get(url, headers=headers, params=params,
+                                 timeout=min(STATION_HTTP_TIMEOUT, HTTP_TIMEOUT))
                 if r.status_code != 200:
                     continue
                 try:
                     data = r.json()
                 except Exception:
                     continue
-
                 stations = None
                 if isinstance(data, list):
                     stations = data
                 elif isinstance(data, dict):
-                    for key in ("result", "results", "stations", "stopPlaces", "stopplaces"):
+                    for key in ("result","results","stations","stopPlaces","stopplaces"):
                         val = data.get(key)
                         if isinstance(val, list):
                             stations = val
                             break
-
-                if stations is None:
+                if not stations:
                     continue
-
-                # Filter: only Bavaria + must have evaNumbers
-                stations = [s for s in stations
-                            if (s.get("federalStateCode") == "DE-BY") and s.get("evaNumbers")]
-
+                # Bavaria only + have evaNumbers
+                stations = [s for s in stations if (s.get("federalStateCode") == "DE-BY") and s.get("evaNumbers")]
                 if stations:
-                    return stations
+                    out = stations
+                    break
             except Exception:
+                # try next attempt/variant
                 pass
-        if attempt < HTTP_RETRIES:
-            time.sleep(0.3 * (2 ** attempt))
-    return []
+            if attempt < HTTP_RETRIES:
+                time.sleep(0.25 * (2 ** attempt))
+        if out:
+            break
+    return out if out else []
 
 def _pick_best_station(results, query_norm: str):
     best = None; best_score = -1
@@ -436,36 +420,19 @@ def rank_stations(results, query_norm: str):
 
 def find_station_candidates(user_input: str, limit: int = 3):
     """
-    Returns (best_exact_match, candidates)
-    best_exact_match — station dict on exact name match,
-    candidates — up to 3 best candidates (Bavaria-only).
+    Returns (best_exact_match, candidates).
+    Uses exact query first; if no 100% match, returns ranked top N from
+    exact + München*/Muenchen* wildcard variant performed by _station_search.
     """
     primary = _apply_aliases(user_input)
     qn = _norm(primary)
 
-    # 1) as typed (with alias)
     results = _station_search(primary)
     ranked = rank_stations(results, qn)
 
-    if ranked and ranked[0][1] >= 100:
-        top_station = ranked[0][0]
-        nn = _norm(top_station.get("name", ""))
-        if nn == qn:
-            return top_station, []
-
-    # 2) "*...*"
-    if not ranked:
-        wildcard = f"*{user_input}*"
-        results = _station_search(wildcard)
-        ranked = rank_stations(results, _norm(user_input))
-
-    # 3) München*... / Muenchen*...
-    if not ranked:
-        for variant in (f"München*{user_input}*", f"Muenchen*{user_input}*"):
-            results = _station_search(variant)
-            ranked = rank_stations(results, _norm(variant.replace("*", " ")))
-            if ranked:
-                break
+    # 100% exact name match
+    if ranked and ranked[0][1] >= 100 and _norm(ranked[0][0].get("name","")) == qn:
+        return ranked[0][0], []
 
     if not ranked:
         return None, []
@@ -480,23 +447,7 @@ def get_station_id_and_name(station_query: str) -> Tuple[Optional[int], Optional
     results = _station_search(primary)
     best = _pick_best_station(results, qn)
     if best:
-        eva = best["evaNumbers"][0]["number"]
-        return eva, best.get("name") or station_query
-
-    wildcard = f"*{station_query}*"
-    results = _station_search(wildcard)
-    best = _pick_best_station(results, _norm(station_query))
-    if best:
-        eva = best["evaNumbers"][0]["number"]
-        return eva, best.get("name") or station_query
-
-    for variant in (f"München*{station_query}*", f"Muenchen*{station_query}*"):
-        results = _station_search(variant)
-        best = _pick_best_station(results, _norm(variant.replace("*"," ")))
-        if best:
-            eva = best["evaNumbers"][0]["number"]
-            return eva, best.get("name") or station_query
-
+        return best["evaNumbers"][0]["number"], best.get("name") or station_query
     return None, None
 
 # ================== DB PLAN/FCHG MODELS ==================
@@ -1199,54 +1150,6 @@ async def cmd_lang(update, context):
         return
     await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
 
-
-# ================== FEEDBACK VIA /feedback ==================
-async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if ADMIN_CHAT_ID == 0:
-        await update.message.reply_text(T(context, "feedback_unavailable"))
-        return
-    context.user_data["await_feedback"] = True
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "btn_cancel_feedback"), callback_data="A:FDBK_CANCEL")]])
-    await update.message.reply_text(T(context, "feedback_prompt"), reply_markup=kb)
-
-async def on_feedback_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    context.user_data["await_feedback"] = False
-    await q.edit_message_text(T(context, "feedback_cancelled"), reply_markup=nav_menu(context))
-
-async def on_feedback_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("await_feedback"):
-        return
-    context.user_data["await_feedback"] = False
-
-    if ADMIN_CHAT_ID == 0:
-        await update.message.reply_text(T(context, "feedback_unavailable"), reply_markup=nav_menu(context))
-        return
-
-    user = update.effective_user
-    chat = update.effective_chat
-    text = update.message.text or ""
-    anon = _anon_id(user.id) if FEEDBACK_SALT else "anonymous"
-    lang = get_user_lang(context)
-    line = context.user_data.get("line", "—")
-    ts   = datetime.datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d %H:%M:%S")
-
-    payload = (
-        f"📮 BOT Feedback\n"
-        f"• anon_id: <code>{html.escape(anon)}</code>\n"
-        f"• lang: {html.escape(lang)}\n"
-        f"• line: {html.escape(line)}\n"
-        f"• chat_id: <code>{chat.id}</code>\n"
-        f"• time: {ts}\n\n"
-        f"{html.escape(text)}"
-    )
-
-    try:
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=payload, parse_mode="HTML", disable_web_page_preview=True)
-        await update.message.reply_text(T(context, "feedback_thanks"), reply_markup=nav_menu(context))
-    except Exception as e:
-        await update.message.reply_text(T(context, "fetch_error", error=html.escape(str(e))), reply_markup=nav_menu(context))
 # ================== WIRING ==================
 if __name__ == "__main__":
     print("🚀 Bot starting (polling)...")
@@ -1254,7 +1157,6 @@ if __name__ == "__main__":
 
     # Commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("feedback", cmd_feedback))
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("departures", cmd_departures))
     app.add_handler(CommandHandler("messages", cmd_messages))
@@ -1268,7 +1170,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(on_show_messages,     pattern=r"^A:MSG$"))
     app.add_handler(CallbackQueryHandler(on_departures_prompt, pattern=r"^A:DEP$"))
     app.add_handler(CallbackQueryHandler(on_back_main,         pattern=r"^B:MAIN$"))
-    app.add_handler(CallbackQueryHandler(on_feedback_cancel, pattern=r"^A:FDBK_CANCEL$"))
 
     # Station pick / back to actions
     app.add_handler(CallbackQueryHandler(on_station_picked, pattern=r"^ST:"))
@@ -1278,7 +1179,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(on_details, pattern=r"^D:"))
 
     # Free text for station input
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_feedback_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
 
     print("✅ Bot started (polling).")
