@@ -29,6 +29,17 @@ from telegram.ext import (
 from telegram.error import BadRequest
 
 # ================== CONFIG ==================
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+FEEDBACK_SALT = os.getenv("FEEDBACK_SALT", "")
+
+def _anon_id(user_id: int) -> str:
+    try:
+        base = f"{user_id}:{FEEDBACK_SALT}"
+        import hashlib as _hl
+        return _hl.sha256(base.encode("utf-8")).hexdigest()[:10]
+    except Exception:
+        return "anonymous"
+
 BOT_TOKEN   = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
 CLIENT_ID   = os.getenv("DB_CLIENT_ID") or "YOUR_DB_CLIENT_ID"
 API_KEY_DB  = os.getenv("DB_API_KEY")  or "YOUR_DB_API_KEY"
@@ -59,7 +70,15 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "choose_language": "Choose language",
         "choose_line": "Choose an S-Bahn line:",
         "lines": "Lines:",
-        "you_selected_line": "You selected {line}. Choose an action:",
+        "you_selected_line": "You selected {line,
+        "btn_cancel_feedback": "✖️ Cancel",
+        "feedback_prompt": "Tell me what didn’t work or what to improve. I’ll pass it on anonymously.
+
+Send your message now, or press Cancel.",
+        "feedback_thanks": "Thanks! Your feedback was delivered anonymously.",
+        "feedback_unavailable": "Feedback destination is not configured. Please try later.",
+        "feedback_cancelled": "Feedback canceled."
+    }. Choose an action:",
         "actions": "Actions:",
         "btn_service_messages": "🚧 Disruptions & messages",
         "btn_train_departures": "🚉 Train departures (by station)",
@@ -95,7 +114,15 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "choose_language": "Sprache wählen",
         "choose_line": "S-Bahn-Linie auswählen:",
         "lines": "Linien:",
-        "you_selected_line": "Du hast {line} gewählt. Aktion auswählen:",
+        "you_selected_line": "Du hast {line,
+        "btn_cancel_feedback": "✖️ Abbrechen",
+        "feedback_prompt": "Was hat nicht geklappt oder was können wir verbessern? Die Nachricht wird anonym weitergeleitet.
+
+Jetzt schreiben oder Abbrechen drücken.",
+        "feedback_thanks": "Danke! Dein Feedback wurde anonym übermittelt.",
+        "feedback_unavailable": "Feedback-Ziel ist nicht konfiguriert. Bitte später erneut versuchen.",
+        "feedback_cancelled": "Feedback abgebrochen."
+    } gewählt. Aktion auswählen:",
         "actions": "Aktionen:",
         "btn_service_messages": "🚧 Störungen & Meldungen",
         "btn_train_departures": "🚉 Abfahrten (nach Station)",
@@ -131,7 +158,15 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "choose_language": "Виберіть мову",
         "choose_line": "Оберіть лінію S-Bahn:",
         "lines": "Лінії:",
-        "you_selected_line": "Ви обрали {line}. Оберіть дію:",
+        "you_selected_line": "Ви обрали {line,
+        "btn_cancel_feedback": "✖️ Скасувати",
+        "feedback_prompt": "Що не спрацювало або що можна покращити? Повідомлення буде надіслано анонімно.
+
+Надішліть його зараз або натисніть Скасувати.",
+        "feedback_thanks": "Дякуємо! Ваш відгук надіслано анонімно.",
+        "feedback_unavailable": "Місце призначення для відгуків не налаштовано. Спробуйте пізніше.",
+        "feedback_cancelled": "Відгук скасовано."
+    }. Оберіть дію:",
         "actions": "Дії:",
         "btn_service_messages": "🚧 Несправності та оголошення",
         "btn_train_departures": "🚉 Відправлення (за станцією)",
@@ -1173,6 +1208,54 @@ async def cmd_lang(update, context):
         return
     await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
 
+
+# ================== FEEDBACK VIA /feedback ==================
+async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_CHAT_ID == 0:
+        await update.message.reply_text(T(context, "feedback_unavailable"))
+        return
+    context.user_data["await_feedback"] = True
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "btn_cancel_feedback"), callback_data="A:FDBK_CANCEL")]])
+    await update.message.reply_text(T(context, "feedback_prompt"), reply_markup=kb)
+
+async def on_feedback_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["await_feedback"] = False
+    await q.edit_message_text(T(context, "feedback_cancelled"), reply_markup=nav_menu(context))
+
+async def on_feedback_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("await_feedback"):
+        return
+    context.user_data["await_feedback"] = False
+
+    if ADMIN_CHAT_ID == 0:
+        await update.message.reply_text(T(context, "feedback_unavailable"), reply_markup=nav_menu(context))
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+    text = update.message.text or ""
+    anon = _anon_id(user.id) if FEEDBACK_SALT else "anonymous"
+    lang = get_user_lang(context)
+    line = context.user_data.get("line", "—")
+    ts   = datetime.datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d %H:%M:%S")
+
+    payload = (
+        f"📮 BOT Feedback\n"
+        f"• anon_id: <code>{html.escape(anon)}</code>\n"
+        f"• lang: {html.escape(lang)}\n"
+        f"• line: {html.escape(line)}\n"
+        f"• chat_id: <code>{chat.id}</code>\n"
+        f"• time: {ts}\n\n"
+        f"{html.escape(text)}"
+    )
+
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=payload, parse_mode="HTML", disable_web_page_preview=True)
+        await update.message.reply_text(T(context, "feedback_thanks"), reply_markup=nav_menu(context))
+    except Exception as e:
+        await update.message.reply_text(T(context, "fetch_error", error=html.escape(str(e))), reply_markup=nav_menu(context))
 # ================== WIRING ==================
 if __name__ == "__main__":
     print("🚀 Bot starting (polling)...")
@@ -1180,6 +1263,7 @@ if __name__ == "__main__":
 
     # Commands
     app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("feedback", cmd_feedback))
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("departures", cmd_departures))
     app.add_handler(CommandHandler("messages", cmd_messages))
@@ -1193,6 +1277,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(on_show_messages,     pattern=r"^A:MSG$"))
     app.add_handler(CallbackQueryHandler(on_departures_prompt, pattern=r"^A:DEP$"))
     app.add_handler(CallbackQueryHandler(on_back_main,         pattern=r"^B:MAIN$"))
+    app.add_handler(CallbackQueryHandler(on_feedback_cancel, pattern=r"^A:FDBK_CANCEL$"))
 
     # Station pick / back to actions
     app.add_handler(CallbackQueryHandler(on_station_picked, pattern=r"^ST:"))
@@ -1202,6 +1287,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(on_details, pattern=r"^D:"))
 
     # Free text for station input
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_feedback_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
 
     print("✅ Bot started (polling).")
