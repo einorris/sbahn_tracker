@@ -309,9 +309,10 @@ def _apply_aliases(q: str) -> str:
         "flughafen münchen": "Flughafen München",
         "flughafen": "Flughafen München",
         "flughafen muenchen": "Flughafen München",
-        "visitor park": "München Flughafen Besucherpark",
-        "besucherpark": "München Flughafen Besucherpark",
-        "Flughafen besucherpark": "München Flughafen Besucherpark",
+        "visitor park": "Flughafen München Besucherpark",
+        "besucherpark": "Flughafen München Besucherpark",
+        "Flughafen besucherpark": "Flughafen München Besucherpark",
+        "München Flughafen Besucherpark": "Flughafen München Besucherpark",
 
         # S2 to Erding
         "erding": "Erding",
