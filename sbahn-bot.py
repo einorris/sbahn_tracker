@@ -1,7 +1,6 @@
 # sbahn_bot.py
 # UI на константах (EN/DE/UK), DeepL используется только для переводов внешних сообщений (MVG).
 # Легко расширяется новыми языками: добавь словарь в UI_STRINGS и код языка в SUPPORTED_LANGS.
-# Новое: автоудаление всех сообщений бота через 2 часа (настраивается AUTO_DELETE_SECONDS).
 
 import os
 import re
@@ -16,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from datetime import timezone, timedelta
+import asyncio
 from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -26,17 +26,13 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.ext import JobQueue
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest
 
 # ================== CONFIG ==================
 BOT_TOKEN   = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
 CLIENT_ID   = os.getenv("DB_CLIENT_ID") or "YOUR_DB_CLIENT_ID"
 API_KEY_DB  = os.getenv("DB_API_KEY")  or "YOUR_DB_API_KEY"
 DEEPL_AUTH_KEY = os.getenv("DEEPL_AUTH_KEY")  # xxxxxxxx:fx
-
-# Через сколько секунд удалять сообщения бота (0 или меньше чтобы отключить). По умолчанию 2 часа.
-AUTO_DELETE_SECONDS = int(os.getenv("AUTO_DELETE_SECONDS", "7200"))
 
 MVG_URL = "https://www.mvg.de/api/bgw-pt/v3/messages"
 DB_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
@@ -291,7 +287,7 @@ def _apply_aliases(q: str) -> str:
         "laim": "München Laim",
         "pasing": "München-Pasing",
         "muenchen pasing": "München-Pasing",
-        "münchen pasing": "Мünchen-Pasing",
+        "münchen pasing": "München-Pasing",
 
         "ostbahnhof": "München Ost",
         "munich east": "München Ost",
@@ -782,42 +778,22 @@ def format_departure_html(ev, context) -> str:
 
     return result
 
-# ================== AUTO-DELETE HELPERS ==================
-async def _autodelete_job(context: ContextTypes.DEFAULT_TYPE):
-    if AUTO_DELETE_SECONDS <= 0:
-        return
-    data = context.job.data or {}
-    chat_id = data.get("chat_id")
-    message_id = data.get("message_id")
-    if not chat_id or not message_id:
+# ================== AUTO-DELETE (asyncio, без JobQueue) ==================
+async def _sleep_and_delete(bot, chat_id: int, message_id: int, delay: int):
+    if delay <= 0:
         return
     try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except (BadRequest, Forbidden):
-        # уже удалено / нет прав — игнор
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        # Игнорируем любые ошибки удаления (сообщение уже удалено/нет прав/и т.п.)
         pass
 
 def schedule_autodelete(context: ContextTypes.DEFAULT_TYPE, message):
     if AUTO_DELETE_SECONDS <= 0 or message is None:
         return
-
-    # Пытаемся взять job_queue из контекста, если там пусто — из приложения
-    jq = getattr(context, "job_queue", None)
-    if jq is None:
-        app = getattr(context, "application", None)
-        jq = getattr(app, "job_queue", None) if app else None
-
-    # Если и тут пусто — просто выходим без аварии
-    if jq is None:
-        return
-
-    when = datetime.timedelta(seconds=AUTO_DELETE_SECONDS)
-    jq.run_once(
-        _autodelete_job,
-        when=when,
-        data={"chat_id": message.chat_id, "message_id": message.message_id},
-        name=f"autodel:{message.chat_id}:{message.message_id}",
-    )
+    # Создаём задачу в текущем asyncio loop
+    asyncio.create_task(_sleep_and_delete(context.bot, message.chat_id, message.message_id, AUTO_DELETE_SECONDS))
 
 
 async def safe_send_html(message_func, text_html: str):
@@ -849,9 +825,7 @@ async def edit_and_autodelete(context: ContextTypes.DEFAULT_TYPE, callback_query
     except Exception:
         pass
 
-def short_id_for_message(msg):
-    basis = f"{msg.get('id','')}-{msg.get('title','')}-{msg.get('publication','')}"
-    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+# ================== UI HELPERS ==================
 
 # ================== UI HELPERS ==================
 def nav_menu(context):
@@ -880,6 +854,21 @@ def lang_picker_markup():
     buttons = [InlineKeyboardButton(labels.get(code, code), callback_data=f"{CB_LANG_PREFIX}{code}") for code in SUPPORTED_LANGS]
     return InlineKeyboardMarkup([buttons])
 
+async def safe_send_html(message_func, text_html: str):
+    try:
+        return await message_func(text_html, parse_mode="HTML", disable_web_page_preview=True)
+    except BadRequest:
+        txt = text_html
+        txt = re.sub(r"(?is)<\s*br\b[^>]*>", "\n", txt)
+        txt = re.sub(r"(?is)</\s*p\s*>", "\n\n", txt)
+        txt = re.sub(r"(?is)<[^>]+>", "", txt)
+        txt = html.unescape(txt)
+        return await message_func(txt, disable_web_page_preview=True)
+
+def short_id_for_message(msg):
+    basis = f"{msg.get('id','')}-{msg.get('title','')}-{msg.get('publication','')}"
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+
 # ================== BOT HANDLERS (Messages) ==================
 def fetch_line_messages_safe(line: str):
     data = fetch_messages()
@@ -887,7 +876,7 @@ def fetch_line_messages_safe(line: str):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await reply_and_autodelete(context, update.message, T(context, "choose_language"), reply_markup=lang_picker_markup())
+    await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
 
 async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -897,16 +886,17 @@ async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = "en"
     context.user_data["lang"] = lang
 
-    await reply_and_autodelete(context, q.message, T(context, "choose_line"), reply_markup=line_picker_markup(context))
+    #await q.edit_message_text(T(context, "choose_line"))
+    #await q.message.reply_text(T(context, "tip_lang"))
+    await q.message.reply_text(T(context, "choose_line"), reply_markup=line_picker_markup(context))
 
 async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     line = q.data.replace(CB_LINE_PREFIX, "")
     context.user_data["line"] = line
-    await reply_and_autodelete(
-        context,
-        q.message,
+    #await q.edit_message_text(T(context, "you_selected_line", line=line))
+    await q.message.reply_text(
         T(context, "you_selected_line", line=line),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(T(context, "btn_service_messages"), callback_data=CB_ACT_MSG)],
@@ -925,11 +915,11 @@ async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["msg_map"] = {}
 
         if not msgs:
-            await reply_and_autodelete(context, q.message, T(context, "no_messages_for_line", line=line))
-            await reply_and_autodelete(context, q.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+            await q.message.reply_text(T(context, "no_messages_for_line", line=line))
+            await q.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
             return
 
-        await reply_and_autodelete(context, q.message, T(context, "service_messages_for_line", line=line))
+        await q.message.reply_text(T(context, "service_messages_for_line", line=line), parse_mode="HTML")
 
         for m in msgs:
             mid = short_id_for_message(m)
@@ -942,16 +932,13 @@ async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title_shown = TR_MSG(context, title_de, is_html=True)
             text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "details"), callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
-            await send_html_and_autodelete(context, q.message.reply_text, text)
-            # Кнопки отдельно, чтобы не потерять формат
-            msg_kb = await q.message.reply_text(".", reply_markup=kb)
-            schedule_autodelete(context, msg_kb)
+            await q.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
-        await reply_and_autodelete(context, q.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+        await q.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
 
     except Exception as e:
-        await reply_and_autodelete(context, q.message, T(context, "fetch_error", error=html.escape(str(e))))
-        await reply_and_autodelete(context, q.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+        await q.message.reply_text(T(context, "fetch_error", error=html.escape(str(e))))
+        await q.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
 
 async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -959,8 +946,8 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mid = q.data.replace(CB_DETAIL_PREFIX, "")
     m = (context.user_data.get("msg_map") or {}).get(mid)
     if not m:
-        await reply_and_autodelete(context, q.message, T(context, "message_details_not_found"))
-        await reply_and_autodelete(context, q.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+        await q.message.reply_text(T(context, "message_details_not_found"))
+        await q.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
         return
 
     title_de = m.get("title", "Ohne Titel")
@@ -972,8 +959,8 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc_out  = TR_MSG(context, desc_de, is_html=True)
 
     text_html = f"📢 <b>{html.escape(title_out)}</b>\n🕓 {pub_s} UTC\n\n{desc_out}"
-    await send_html_and_autodelete(context, q.message.reply_text, text_html)
-    await reply_and_autodelete(context, q.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+    await safe_send_html(q.message.reply_text, text_html)
+    await q.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
 
 # ================== DEPARTURES (PLAN ⊕ FCHG) ==================
 async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -981,8 +968,7 @@ async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     await q.answer()
     context.user_data["await_station"] = True
 
-    await edit_and_autodelete(
-        context, q,
+    await q.edit_message_text(
         T(context, "enter_station_prompt"),
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(T(context, "btn_back"), callback_data=CB_BACK_ACTIONS)]]
@@ -995,7 +981,7 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["await_station"] = False
 
     station_in = update.message.text.strip()
-    await reply_and_autodelete(context, update.message, T(context, "searching_station", station=station_in))
+    await update.message.reply_text(T(context, "searching_station", station=station_in))
 
     try:
         best_exact, candidates = find_station_candidates(station_in, limit=3)
@@ -1007,9 +993,8 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if not candidates:
-            await reply_and_autodelete(
-                context,
-                update.message,
+            # >>> Здесь показываем компактное меню "Search again" + "Back"
+            await update.message.reply_text(
                 T(context, "no_station_found"),
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(T(context, "btn_search_again"), callback_data=CB_ACT_DEP)],
@@ -1037,22 +1022,19 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rows.append([InlineKeyboardButton(T(context, "btn_back"), callback_data=CB_BACK_ACTIONS)])
 
-        await reply_and_autodelete(
-            context,
-            update.message,
+        await update.message.reply_text(
             T(context, "choose_station"),
             reply_markup=InlineKeyboardMarkup(rows)
         )
     except Exception as e:
-        await reply_and_autodelete(context, update.message, T(context, "station_search_error", error=html.escape(str(e))))
-        await reply_and_autodelete(context, update.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+        await update.message.reply_text(T(context, "station_search_error", error=html.escape(str(e))))
+        await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
 
 async def on_back_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     context.user_data["await_station"] = False
-    await edit_and_autodelete(
-        context, q,
+    await q.edit_message_text(
         T(context, "choose_next"),
         reply_markup=nav_menu(context)
     )
@@ -1068,12 +1050,15 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
             selected_line=selected_line
         )
     except Exception as e:
-        await reply_and_autodelete(context, message_obj, T(context, "fetch_error", error=str(e)), reply_markup=nav_menu(context))
+        await message_obj.reply_text(
+            T(context, "fetch_error", error=str(e)),
+            reply_markup=nav_menu(context)
+        )
         return
 
     line_suffix = f" — {selected_line}" if selected_line else ""
     header = T(context, "departures_header", station=station_name, line_suffix=line_suffix)
-    await send_html_and_autodelete(context, message_obj.reply_text, f"<b>{html.escape(header)}</b>")
+    await safe_send_html(message_obj.reply_text, f"<b>{html.escape(header)}</b>")
 
     out_lines = []
     for ev in events:
@@ -1082,15 +1067,15 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
             out_lines.append(line_html)
 
     if not out_lines:
-        await reply_and_autodelete(context, message_obj, T(context, "no_departures"), reply_markup=nav_menu(context))
+        await message_obj.reply_text(T(context, "no_departures"), reply_markup=nav_menu(context))
         return
 
     footer = ""
     if not live_ok:
         footer = "\n\n" + T(context, "live_unavailable")
 
-    await send_html_and_autodelete(context, message_obj.reply_text, "\n".join(out_lines) + footer)
-    await reply_and_autodelete(context, message_obj, T(context, "choose_next"), reply_markup=nav_menu(context))
+    await safe_send_html(message_obj.reply_text, "\n".join(out_lines) + footer)
+    await message_obj.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
 
 async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1106,7 +1091,10 @@ async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         eva = int(eva_str)
     except ValueError:
-        await reply_and_autodelete(context, q.message, T(context, "invalid_station_id"), reply_markup=nav_menu(context))
+        await q.message.reply_text(
+            T(context, "invalid_station_id"),
+            reply_markup=nav_menu(context)
+        )
         return
 
     await _send_departures_for_eva(q.message, context, eva, station_name)
@@ -1118,7 +1106,7 @@ async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     context.user_data.clear()
     context.user_data["lang"] = lang
-    await edit_and_autodelete(context, q, T(context, "choose_line"), reply_markup=line_picker_markup(context))
+    await q.edit_message_text(T(context, "choose_line"), reply_markup=line_picker_markup(context))
 
 # ----- TG commands --------
 async def cmd_line(update, context):
@@ -1128,9 +1116,9 @@ async def cmd_line(update, context):
         if not line.startswith("S"):
             line = "S" + line
         context.user_data["line"] = line
-        await reply_and_autodelete(context, update.message, T(context, "you_selected_line", line=line), reply_markup=nav_menu(context))
+        await update.message.reply_text(T(context, "you_selected_line", line=line), reply_markup=nav_menu(context))
         return
-    await reply_and_autodelete(context, update.message, T(context, "choose_line"), reply_markup=line_picker_markup(context))
+    await update.message.reply_text(T(context, "choose_line"), reply_markup=line_picker_markup(context))
 
 async def cmd_messages(update, context):
     line = context.user_data.get("line", "S2")
@@ -1139,11 +1127,11 @@ async def cmd_messages(update, context):
         context.user_data["msg_map"] = {}
 
         if not msgs:
-            await reply_and_autodelete(context, update.message, T(context, "no_messages_for_line", line=line))
-            await reply_and_autodelete(context, update.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+            await update.message.reply_text(T(context, "no_messages_for_line", line=line))
+            await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
             return
 
-        await reply_and_autodelete(context, update.message, T(context, "service_messages_for_line", line=line))
+        await update.message.reply_text(T(context, "service_messages_for_line", line=line), parse_mode="HTML")
 
         for m in msgs:
             mid = short_id_for_message(m)
@@ -1154,14 +1142,12 @@ async def cmd_messages(update, context):
             title_shown = TR_MSG(context, title_de, is_html=True)
             text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "details"), callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
-            await send_html_and_autodelete(context, update.message.reply_text, text)
-            msg_kb = await update.message.reply_text(".", reply_markup=kb)
-            schedule_autodelete(context, msg_kb)
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
-        await reply_and_autodelete(context, update.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+        await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
     except Exception as e:
-        await reply_and_autodelete(context, update.message, T(context, "fetch_error", error=html.escape(str(e))))
-        await reply_and_autodelete(context, update.message, T(context, "choose_next"), reply_markup=nav_menu(context))
+        await update.message.reply_text(T(context, "fetch_error", error=html.escape(str(e))))
+        await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
 
 async def cmd_departures(update, context):
     if context.args:
@@ -1170,9 +1156,7 @@ async def cmd_departures(update, context):
         await on_station_input(update, context)
         return
     context.user_data["await_station"] = True
-    await reply_and_autodelete(
-        context,
-        update.message,
+    await update.message.reply_text(
         T(context, "enter_station_prompt"),
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "btn_back"), callback_data=CB_BACK_ACTIONS)]])
     )
@@ -1181,22 +1165,18 @@ async def cmd_lang(update, context):
     if context.args:
         lang = context.args[0].lower()
         if lang not in SUPPORTED_LANGS:
-            await reply_and_autodelete(context, update.message, T(context, "cmd_lang_usage"))
+            await update.message.reply_text(T(context, "cmd_lang_usage"))
             return
         context.user_data["lang"] = lang
-        await reply_and_autodelete(context, update.message, T(context, "language_updated"), reply_markup=nav_menu(context))
+        await update.message.reply_text(T(context, "language_updated"), reply_markup=nav_menu(context))
         return
-    await reply_and_autodelete(context, update.message, T(context, "choose_language"), reply_markup=lang_picker_markup())
+    await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
 
 # ================== WIRING ==================
 if __name__ == "__main__":
     print("🚀 Bot starting (polling)...")
-    app = (
-    ApplicationBuilder()
-    .token(BOT_TOKEN)
-    .job_queue(JobQueue())   # <- вот это не даст job_queue быть None
-    .build()
-)
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("lang", cmd_lang))
