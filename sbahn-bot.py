@@ -70,15 +70,12 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "choose_language": "Choose language",
         "choose_line": "Choose an S-Bahn line:",
         "lines": "Lines:",
-        "you_selected_line": "You selected {line,
+        "you_selected_line": "You selected {line}. Choose an action:",
         "btn_cancel_feedback": "✖️ Cancel",
-        "feedback_prompt": "Tell me what didn’t work or what to improve. I’ll pass it on anonymously.
-
-Send your message now, or press Cancel.",
+        "feedback_prompt": "Tell me what didn’t work or what to improve. I’ll pass it on anonymously. Send your message now, or press Cancel.",
         "feedback_thanks": "Thanks! Your feedback was delivered anonymously.",
         "feedback_unavailable": "Feedback destination is not configured. Please try later.",
-        "feedback_cancelled": "Feedback canceled."
-    }. Choose an action:",
+        "feedback_cancelled": "Feedback canceled.",
         "actions": "Actions:",
         "btn_service_messages": "🚧 Disruptions & messages",
         "btn_train_departures": "🚉 Train departures (by station)",
@@ -114,15 +111,12 @@ Send your message now, or press Cancel.",
         "choose_language": "Sprache wählen",
         "choose_line": "S-Bahn-Linie auswählen:",
         "lines": "Linien:",
-        "you_selected_line": "Du hast {line,
+        "you_selected_line": "Du hast {line} gewählt. Aktion auswählen:",
         "btn_cancel_feedback": "✖️ Abbrechen",
-        "feedback_prompt": "Was hat nicht geklappt oder was können wir verbessern? Die Nachricht wird anonym weitergeleitet.
-
-Jetzt schreiben oder Abbrechen drücken.",
+        "feedback_prompt": "Was hat nicht geklappt oder was können wir verbessern? Die Nachricht wird anonym weitergeleitet. Jetzt schreiben oder Abbrechen drücken.",
         "feedback_thanks": "Danke! Dein Feedback wurde anonym übermittelt.",
         "feedback_unavailable": "Feedback-Ziel ist nicht konfiguriert. Bitte später erneut versuchen.",
-        "feedback_cancelled": "Feedback abgebrochen."
-    } gewählt. Aktion auswählen:",
+        "feedback_cancelled": "Feedback abgebrochen.",
         "actions": "Aktionen:",
         "btn_service_messages": "🚧 Störungen & Meldungen",
         "btn_train_departures": "🚉 Abfahrten (nach Station)",
@@ -158,15 +152,12 @@ Jetzt schreiben oder Abbrechen drücken.",
         "choose_language": "Виберіть мову",
         "choose_line": "Оберіть лінію S-Bahn:",
         "lines": "Лінії:",
-        "you_selected_line": "Ви обрали {line,
+        "you_selected_line": "Ви обрали {line}. Оберіть дію:",
         "btn_cancel_feedback": "✖️ Скасувати",
-        "feedback_prompt": "Що не спрацювало або що можна покращити? Повідомлення буде надіслано анонімно.
-
-Надішліть його зараз або натисніть Скасувати.",
+        "feedback_prompt": "Що не спрацювало або що можна покращити? Повідомлення буде надіслано анонімно. Надішліть його зараз або натисніть Скасувати.",
         "feedback_thanks": "Дякуємо! Ваш відгук надіслано анонімно.",
         "feedback_unavailable": "Місце призначення для відгуків не налаштовано. Спробуйте пізніше.",
-        "feedback_cancelled": "Відгук скасовано."
-    }. Оберіть дію:",
+        "feedback_cancelled": "Відгук скасовано.",
         "actions": "Дії:",
         "btn_service_messages": "🚧 Несправності та оголошення",
         "btn_train_departures": "🚉 Відправлення (за станцією)",
@@ -1263,7 +1254,7 @@ if __name__ == "__main__":
 
     # Commands
     app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("feedback", cmd_feedback))
+    app.add_handler(CommandHandler("feedback", cmd_feedback))
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("departures", cmd_departures))
     app.add_handler(CommandHandler("messages", cmd_messages))
