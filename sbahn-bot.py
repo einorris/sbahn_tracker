@@ -294,6 +294,7 @@ def _apply_aliases(q: str) -> str:
 
         "ostbahnhof": "München Ost",
         "munich east": "München Ost",
+        "munchen ost": "München Ost",
         "muenchen ostbahnhof": "München Ost",
         "münchen ostbahnhof": "München Ost",
         "leuchtenbergring": "München Leuchtenbergring",
