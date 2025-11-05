@@ -1020,7 +1020,7 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 label = f"{name} · {extra} ({eva})"
             rows.append([InlineKeyboardButton(label, callback_data=f"{CB_PICK_STATION}{eva}")])
 
-        rows.append([InlineKeyboardButton(T(context, "btn_back"), callback_data=CB_BACK_ACTIONS)])
+        rows.append([InlineKeyboardButton(T(context, "btn_search_again"), callback_data=CB_ACT_DEP)],[InlineKeyboardButton(T(context, "btn_back"), callback_data=CB_BACK_ACTIONS)])
 
         await update.message.reply_text(
             T(context, "choose_station"),
