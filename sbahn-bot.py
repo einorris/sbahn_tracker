@@ -29,6 +29,20 @@ from telegram.ext import (
 from telegram.error import BadRequest
 
 # ================== CONFIG ==================
+
+# ================== CONFIG ==================
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+FEEDBACK_SALT = os.getenv("FEEDBACK_SALT", "")
+
+def _anon_id(user_id: int) -> str:
+    try:
+        base = f"{user_id}:{FEEDBACK_SALT}"
+        import hashlib as _hl
+        return _hl.sha256(base.encode("utf-8")).hexdigest()[:10]
+    except Exception:
+        return "anonymous"
+
+
 BOT_TOKEN   = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
 CLIENT_ID   = os.getenv("DB_CLIENT_ID") or "YOUR_DB_CLIENT_ID"
 API_KEY_DB  = os.getenv("DB_API_KEY")  or "YOUR_DB_API_KEY"
@@ -64,6 +78,11 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "lines": "Lines:",
         "you_selected_line": "You selected {line}. Choose an action:",
         "actions": "Actions:",
+        "btn_cancel_feedback": "✖️ Cancel",
+        "feedback_prompt": "Tell me what didn’t work or what to improve. I’ll pass it on anonymously. Send your message now, or press Cancel.",
+        "feedback_thanks": "Thanks! Your feedback was delivered anonymously.",
+        "feedback_unavailable": "Feedback destination is not configured. Please try later.",
+        "feedback_cancelled": "Feedback canceled.",
         "btn_service_messages": "🚧 Disruptions & messages",
         "btn_train_departures": "🚉 Train departures (by station)",
         "btn_train_departures_short": "🚉 Train departures",
@@ -100,6 +119,11 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "lines": "Linien:",
         "you_selected_line": "Du hast {line} gewählt. Aktion auswählen:",
         "actions": "Aktionen:",
+        "btn_cancel_feedback": "✖️ Abbrechen",
+        "feedback_prompt": "Was hat nicht geklappt oder was können wir verbessern? Die Nachricht wird anonym weitergeleitet. Jetzt schreiben oder Abbrechen drücken.",
+        "feedback_thanks": "Danke! Dein Feedback wurde anonym übermittelt.",
+        "feedback_unavailable": "Feedback-Ziel ist nicht konfiguriert. Bitte später erneut versuchen.",
+        "feedback_cancelled": "Feedback abgebrochen.",
         "btn_service_messages": "🚧 Störungen & Meldungen",
         "btn_train_departures": "🚉 Abfahrten (nach Station)",
         "btn_train_departures_short": "🚉 Abfahrten",
@@ -136,6 +160,11 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "lines": "Лінії:",
         "you_selected_line": "Ви обрали {line}. Оберіть дію:",
         "actions": "Дії:",
+        "btn_cancel_feedback": "✖️ Скасувати",
+        "feedback_prompt": "Що не спрацювало або що можна покращити? Повідомлення буде надіслано анонімно. Надішліть його зараз або натисніть Скасувати.",
+        "feedback_thanks": "Дякуємо! Ваш відгук надіслано анонімно.",
+        "feedback_unavailable": "Місце призначення для відгуків не налаштовано. Спробуйте пізніше.",
+        "feedback_cancelled": "Відгук скасовано.",
         "btn_service_messages": "🚧 Несправності та оголошення",
         "btn_train_departures": "🚉 Відправлення (за станцією)",
         "btn_train_departures_short": "🚉 Відправлення",
@@ -1153,6 +1182,14 @@ async def cmd_lang(update, context):
         await update.message.reply_text(T(context, "language_updated"), reply_markup=nav_menu(context))
         return
     await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
+# ================== FEEDBACK VIA /feedback ==================
+async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_CHAT_ID == 0:
+        await update.message.reply_text(T(context, "feedback_unavailable"))
+        return
+    context.user_data["await_feedback"] = True
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "btn_cancel_feedback"), callback_data="A:FDBK_CANCEL")]])
+    await update.message.reply_text(T(context, "feedback_prompt"), reply_markup=kb)
 
 # ================== WIRING ==================
 if __name__ == "__main__":
@@ -1165,6 +1202,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("departures", cmd_departures))
     app.add_handler(CommandHandler("messages", cmd_messages))
     app.add_handler(CommandHandler("line", cmd_line))
+    app.add_handler(CommandHandler("feedback", cmd_feedback))
 
     # Language picker
     app.add_handler(CallbackQueryHandler(on_language, pattern=r"^LANG:"))
@@ -1174,6 +1212,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(on_show_messages,     pattern=r"^A:MSG$"))
     app.add_handler(CallbackQueryHandler(on_departures_prompt, pattern=r"^A:DEP$"))
     app.add_handler(CallbackQueryHandler(on_back_main,         pattern=r"^B:MAIN$"))
+    app.add_handler(CallbackQueryHandler(on_feedback_cancel, pattern=r"^A:FDBK_CANCEL$"))
 
     # Station pick / back to actions
     app.add_handler(CallbackQueryHandler(on_station_picked, pattern=r"^ST:"))
