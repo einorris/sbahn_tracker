@@ -1301,7 +1301,15 @@ async def on_feedback_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(T(context, "feedback_thanks"), reply_markup=nav_menu(context))
     except Exception as e:
         await update.message.reply_text(T(context, "fetch_error", error=html.escape(str(e))), reply_markup=nav_menu(context))
-
+async def on_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Спочатку фідбек
+    if context.user_data.get("await_feedback"):
+        return await on_feedback_message(update, context)
+    # Далі пошук станції
+    if context.user_data.get("await_station"):
+        return await on_station_input(update, context)
+    # Інакше ігноруємо
+    return
 # ================== WIRING ==================
 if __name__ == "__main__":
     print("🚀 Bot starting (polling)...")
@@ -1314,7 +1322,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("messages", cmd_messages))
     app.add_handler(CommandHandler("line", cmd_line))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
-
+    
     # Language picker
     app.add_handler(CallbackQueryHandler(on_language, pattern=r"^LANG:"))
 
@@ -1324,7 +1332,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(on_departures_prompt, pattern=r"^A:DEP$"))
     app.add_handler(CallbackQueryHandler(on_back_main,         pattern=r"^B:MAIN$"))
     app.add_handler(CallbackQueryHandler(on_feedback_cancel, pattern=r"^A:FDBK_CANCEL$"))
-
+    
     # Station pick / back to actions
     app.add_handler(CallbackQueryHandler(on_station_picked, pattern=r"^ST:"))
     app.add_handler(CallbackQueryHandler(on_back_actions,  pattern=r"^B:ACT$"))
@@ -1333,7 +1341,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(on_details, pattern=r"^D:"))
 
     # Free text for station input
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
-
+    #app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_input))
     print("✅ Bot started (polling).")
     app.run_polling()
