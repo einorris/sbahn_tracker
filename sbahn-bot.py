@@ -67,6 +67,11 @@ CB_DETAIL_PREFIX = "D:"
 CB_PICK_STATION  = "ST:"      # choosing a specific station from candidates
 CB_BACK_ACTIONS  = "B:ACT"    # back to Actions (Messages / Departures)
 
+# 1) нормалізуємо прості HTML у plain text + перенос рядків
+_BR_RE = re.compile(r'<\s*br\s*/?\s*>', re.I)
+_A_RE  = re.compile(r'<\s*a\b[^>]*href\s*=\s*"([^"]+)"[^>]*>(.*?)</\s*a\s*>', re.I | re.S)
+
+
 # ================== UI STRINGS (константы) ==================
 # Чтобы добавить русский:
 # 1) Добавь "ru": {...} ниже
@@ -199,6 +204,32 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
 
 SUPPORTED_LANGS = list(UI_STRINGS.keys())  # ["en", "de", "uk"] — расширяемо
 
+def mvg_html_to_text(s: str) -> str:
+    if not s:
+        return ""
+    # <a href="...">текст</a> -> "текст (url)"
+    s = _A_RE.sub(lambda m: f"{m.group(2).strip()} ({m.group(1).strip()})", s)
+    # <br> -> \n
+    s = _BR_RE.sub("\n", s)
+    # абзаци/списки у щось людське
+    s = re.sub(r'</\s*p\s*>', '\n\n', s, flags=re.I)
+    s = re.sub(r'<\s*p\s*>', '', s, flags=re.I)
+    s = re.sub(r'<\s*/\s*li\s*>', '\n', s, flags=re.I)
+    s = re.sub(r'<\s*li\s*>', '• ', s, flags=re.I)
+    s = re.sub(r'</\s*ul\s*>', '\n', s, flags=re.I)
+    # прибрати решту тегів
+    s = re.sub(r'<[^>]+>', '', s)
+    # розкодувати &amp; &nbsp; тощо
+    s = html.unescape(s)
+    # трохи зачистки пробілів
+    s = re.sub(r'[ \t]+\n', '\n', s)
+    s = re.sub(r'\n{3,}', '\n\n', s)
+    return s.strip()
+
+# 2) підготовка до Telegram HTML: екрануємо спецсимволи після чистки
+def to_tg_html(s: str) -> str:
+    return html.escape(mvg_html_to_text(s))
+
 # ================== TRANSLATION (DeepL — только для внешних текстов) ==================
 DEEPL_URL = "https://api-free.deepl.com/v2/translate"
 
@@ -249,6 +280,37 @@ def TR_MSG(context, text_de: str, is_html: bool=False) -> str:
     return deepl_translate(text_de, _deepl_supported_target(lang), is_html)
 
 # ================== MVG HELPERS ==================
+def _norm_mvg_line_label(x: str) -> str:
+    s = re.sub(r"\s+", "", str(x or "")).upper()   # "S 8" -> "S8", "8" -> "8"
+    if not s:
+        return ""
+    if s.startswith("S"):
+        return s
+    # якщо просто номер, робимо "S8"
+    if s[0].isdigit():
+        return "S" + s
+    return s
+
+def message_is_visible(msg) -> bool:
+    now_ms = datetime.datetime.now(timezone.utc).timestamp() * 1000
+    # 1) інциденти (як у тебе було)
+    for d in (msg.get("incidentDurations") or []):
+        start = d.get("from") or 0
+        end   = d.get("to")   or float("inf")
+        if start <= now_ms <= end:
+            return True
+    # 2) публікаційне вікно (планові/загальні повідомлення)
+    pd = msg.get("publicationDuration")
+    if isinstance(pd, dict):
+        start = pd.get("from") or 0
+        end   = pd.get("to")   or float("inf")
+        if start <= now_ms <= end:
+            return True
+    # 3) запасний варіант: якщо опубліковано нещодавно (48 год)
+    pub = msg.get("publication")
+    if pub and pub >= now_ms - 48*3600*1000:
+        return True
+    return False
 def fetch_messages():
     for attempt in range(HTTP_RETRIES + 1):
         try:
@@ -271,11 +333,15 @@ def is_active(incident_durations):
     return False
 
 def filter_line_messages(messages, line_label):
+    sel = _norm_mvg_line_label(line_label)
     seen = {}
-    for msg in messages:
-        for line in msg.get("lines", []):
-            if (line.get("transportType") in ("SBAHN", "S")) and (line.get("label") == line_label):
-                if is_active(msg.get("incidentDurations", [])):
+    for msg in messages or []:
+        for line in (msg.get("lines") or []):
+            ttype = (line.get("transportType") or "").upper()
+            lbl   = _norm_mvg_line_label(line.get("label") or line.get("name") or "")
+            # допускаємо SBAHN/S; якщо у когось буде "S-Bahn" чи "SBahn" — теж не зашкодить розширити
+            if ttype in ("SBAHN", "S") and lbl == sel:
+                if message_is_visible(msg):
                     title = (msg.get("title") or "").strip()
                     pub = msg.get("publication", 0)
                     if title in seen:
@@ -283,8 +349,8 @@ def filter_line_messages(messages, line_label):
                             seen[title] = msg
                     else:
                         seen[title] = msg
-    # Сортировка по возрастанию: старые сверху, новые внизу
-    return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=False)
+    # свіжі знизу
+    return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
 
 # ================== STATION SEARCH (только Бавария) ==================
 def _norm(s: str) -> str:
@@ -940,7 +1006,10 @@ async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pub_s    = datetime.datetime.fromtimestamp(pub/1000, timezone.utc).strftime("%d.%m.%Y %H:%M") if pub else "?"
 
             title_shown = TR_MSG(context, title_de, is_html=True)
-            text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
+            #text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
+            text = f"<b>{to_tg_html(title_shown)}</b>\n🕓 {pub_s} UTC"
+
+
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "details"), callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
             await q.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
@@ -968,8 +1037,11 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title_out = TR_MSG(context, title_de, is_html=True)
     desc_out  = TR_MSG(context, desc_de, is_html=True)
 
-    text_html = f"📢 <b>{html.escape(title_out)}</b>\n🕓 {pub_s} UTC\n\n{desc_out}"
-    await safe_send_html(q.message.reply_text, text_html)
+    #text_html = f"📢 <b>{html.escape(title_out)}</b>\n🕓 {pub_s} UTC\n\n{desc_out}"
+    #await safe_send_html(q.message.reply_text, text_html)
+    text_html = f"📢 <b>{to_tg_html(title_out)}</b>\n🕓 {pub_s} UTC\n\n{to_tg_html(desc_out)}"
+    await q.message.reply_text(text_html, parse_mode="HTML", disable_web_page_preview=True)
+    
     await q.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
 
 # ================== DEPARTURES (PLAN ⊕ FCHG) ==================
