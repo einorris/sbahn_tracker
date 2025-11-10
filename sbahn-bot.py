@@ -1191,6 +1191,45 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "btn_cancel_feedback"), callback_data="A:FDBK_CANCEL")]])
     await update.message.reply_text(T(context, "feedback_prompt"), reply_markup=kb)
 
+async def on_feedback_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["await_feedback"] = False
+    await q.edit_message_text(T(context, "feedback_cancelled"), reply_markup=nav_menu(context))
+
+async def on_feedback_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("await_feedback"):
+        return
+    context.user_data["await_feedback"] = False
+
+    if ADMIN_CHAT_ID == 0:
+        await update.message.reply_text(T(context, "feedback_unavailable"), reply_markup=nav_menu(context))
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+    text = update.message.text or ""
+    anon = _anon_id(user.id) if FEEDBACK_SALT else "anonymous"
+    lang = get_user_lang(context)
+    line = context.user_data.get("line", "—")
+    ts   = datetime.datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d %H:%M:%S")
+
+    payload = (
+        f"📮 BOT Feedback\n"
+        f"• anon_id: <code>{html.escape(anon)}</code>\n"
+        f"• lang: {html.escape(lang)}\n"
+        f"• line: {html.escape(line)}\n"
+        f"• chat_id: <code>{chat.id}</code>\n"
+        f"• time: {ts}\n\n"
+        f"{html.escape(text)}"
+    )
+
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=payload, parse_mode="HTML", disable_web_page_preview=True)
+        await update.message.reply_text(T(context, "feedback_thanks"), reply_markup=nav_menu(context))
+    except Exception as e:
+        await update.message.reply_text(T(context, "fetch_error", error=html.escape(str(e))), reply_markup=nav_menu(context))
+
 # ================== WIRING ==================
 if __name__ == "__main__":
     print("🚀 Bot starting (polling)...")
