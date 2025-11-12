@@ -350,7 +350,7 @@ def filter_line_messages(messages, line_label):
                     else:
                         seen[title] = msg
     # свіжі знизу
-    return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=True)
+    return sorted(seen.values(), key=lambda m: m.get("publication", 0), reverse=False)
 
 # ================== STATION SEARCH (только Бавария) ==================
 def _norm(s: str) -> str:
