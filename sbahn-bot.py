@@ -1310,38 +1310,116 @@ async def on_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await on_station_input(update, context)
     # Інакше ігноруємо
     return
-# ================== WIRING ==================
-if __name__ == "__main__":
-    print("🚀 Bot starting (polling)...")
+
+# ===== Application factory =====
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+
+def build_app() -> "Application":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Commands
+    # Handlers (як у тебе було; не видаляй свої)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("departures", cmd_departures))
     app.add_handler(CommandHandler("messages", cmd_messages))
     app.add_handler(CommandHandler("line", cmd_line))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
-    
-    # Language picker
-    app.add_handler(CallbackQueryHandler(on_language, pattern=r"^LANG:"))
 
-    # Line & actions
+    app.add_handler(CallbackQueryHandler(on_language, pattern=r"^LANG:"))
     app.add_handler(CallbackQueryHandler(on_line_selected,     pattern=r"^L:"))
     app.add_handler(CallbackQueryHandler(on_show_messages,     pattern=r"^A:MSG$"))
     app.add_handler(CallbackQueryHandler(on_departures_prompt, pattern=r"^A:DEP$"))
     app.add_handler(CallbackQueryHandler(on_back_main,         pattern=r"^B:MAIN$"))
-    app.add_handler(CallbackQueryHandler(on_feedback_cancel, pattern=r"^A:FDBK_CANCEL$"))
-    
-    # Station pick / back to actions
-    app.add_handler(CallbackQueryHandler(on_station_picked, pattern=r"^ST:"))
-    app.add_handler(CallbackQueryHandler(on_back_actions,  pattern=r"^B:ACT$"))
+    app.add_handler(CallbackQueryHandler(on_feedback_cancel,   pattern=r"^A:FDBK_CANCEL$"))
+    app.add_handler(CallbackQueryHandler(on_station_picked,    pattern=r"^ST:"))
+    app.add_handler(CallbackQueryHandler(on_back_actions,      pattern=r"^B:ACT$"))
+    app.add_handler(CallbackQueryHandler(on_details,           pattern=r"^D:"))
 
-    # Details
-    app.add_handler(CallbackQueryHandler(on_details, pattern=r"^D:"))
-
-    # Free text for station input
-    #app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_station_input))
+    # ЄДИНИЙ роутер для тексту (щоб /feedback не ламався)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_input))
-    print("✅ Bot started (polling).")
-    app.run_polling()
+    return app
+# ===== Webhook server (FastAPI) =====
+import os, asyncio
+from fastapi import FastAPI, Request, Response
+import uvicorn
+from telegram import Update
+
+WEBHOOK_BASE   = os.getenv("WEBHOOK_BASE")              # наприклад https://your-app.onrender.com
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")        # довільний токен, можна пустим
+PORT           = int(os.getenv("PORT", "10000"))
+
+fastapi_app = FastAPI()
+tg_app = None  # сюди покладемо PTB Application після build_app()
+
+@fastapi_app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
+@fastapi_app.post(f"/webhook/{BOT_TOKEN}")
+async def telegram_webhook(request: Request):
+    # опціональна перевірка секрету
+    if WEBHOOK_SECRET:
+        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+            return Response(status_code=401)
+    data = await request.json()
+    update = Update.de_json(data, tg_app.bot)
+    await tg_app.update_queue.put(update)
+    return Response(status_code=200)
+
+# ===== Runners =====
+async def run_webhook():
+    global tg_app
+    tg_app = build_app()
+
+    await tg_app.initialize()
+    await tg_app.start()
+    if not WEBHOOK_BASE:
+        raise RuntimeError("WEBHOOK_BASE is not set for webhook mode")
+
+    await tg_app.bot.set_webhook(
+        url=f"{WEBHOOK_BASE}/webhook/{BOT_TOKEN}",
+        secret_token=WEBHOOK_SECRET or None,
+        drop_pending_updates=True
+    )
+
+    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(config)
+    try:
+        await server.serve()
+    finally:
+        await tg_app.stop()
+        await tg_app.shutdown()
+
+async def run_polling():
+    app = build_app()
+    # стандартний асинхронний цикл polling без .run_polling(), щоби стилістично було симетрично
+    await app.initialize()
+    await app.start()
+    try:
+        await app.updater.start_polling(drop_pending_updates=True)  # PTB v20: updater існує в Application
+        # або використай app.run_polling() якщо так зручніше:
+        # await app.run_polling(close_loop=False)
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await app.stop()
+        await app.shutdown()
+
+# ================== WIRING ==================
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["webhook", "polling", "auto"], default=os.getenv("RUN_MODE", "auto"))
+    args = parser.parse_args()
+
+    # auto: якщо є WEBHOOK_BASE або PORT (Render), стартуємо webhook; інакше polling
+    mode = args.mode
+    if mode == "auto":
+        mode = "webhook" if WEBHOOK_BASE or os.getenv("PORT") else "polling"
+
+    print(f"🚀 Starting bot in {mode} mode...")
+    if mode == "webhook":
+        asyncio.run(run_webhook())
+    else:
+        asyncio.run(run_polling())
+
