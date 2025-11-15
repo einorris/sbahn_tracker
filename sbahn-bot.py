@@ -474,10 +474,11 @@ def _station_search(query: str):
         "DB-Api-Key": API_KEY_DB,
     }
     start = time.monotonic()
+    base_params = {"federalstate": "bayern"}
     variants = [
-        {"searchstring": query},
-        {"searchstring": f"München*{query}*"},
-        {"searchstring": f"Muenchen*{query}*"},
+        {**base_params, "searchstring": query},
+        {**base_params, "searchstring": f"München*{query}*"},
+        {**base_params, "searchstring": f"Muenchen*{query}*"},
     ]
     out = []
     for params in variants:
@@ -507,7 +508,7 @@ def _station_search(query: str):
                 if not stations:
                     continue
                 # Bavaria only + have evaNumbers
-                stations = [s for s in stations if (s.get("federalStateCode") == "DE-BY") and s.get("evaNumbers")]
+                stations = [s for s in stations if s.get("evaNumbers")]
                 if stations:
                     out = stations
                     break
@@ -558,17 +559,39 @@ def rank_stations(results, query_norm: str):
 def find_station_candidates(user_input: str, limit: int = 3):
     """
     Returns (best_exact_match, candidates).
-    Uses exact query first; if no 100% match, returns ranked top N from
-    exact + München*/Muenchen* wildcard variant performed by _station_search.
+
+    Uses aliases only for ranking, but queries the DB API with both:
+      * aliased form (e.g. "München Hbf")
+      * original user input (e.g. "Hauptbahnhof", "Riem")
+
+    This allows patterns like "München*Riem*" to work correctly while still
+    preferring canonical Munich station names in scoring.
     """
     primary = _apply_aliases(user_input)
     qn = _norm(primary)
 
-    results = _station_search(primary)
-    ranked = rank_stations(results, qn)
+    # Собираем результаты по aliased и raw запросам, дедуп по EVA/station id
+    combined = []
+    seen_keys = set()
 
-    # 100% exact name match
-    if ranked and ranked[0][1] >= 100 and _norm(ranked[0][0].get("name","")) == qn:
+    for q in dict.fromkeys([primary, user_input]):  # порядок сохраняем, дубликаты убираем
+        if not q:
+            continue
+        for s in _station_search(q):
+            eva_list = s.get("evaNumbers") or []
+            eva = None
+            if isinstance(eva_list, list) and eva_list:
+                eva = eva_list[0].get("number")
+            key = eva or s.get("stationNumber") or s.get("id") or s.get("name")
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            combined.append(s)
+
+    ranked = rank_stations(combined, qn)
+
+    # 100% exact name match vs canonical (aliased) name
+    if ranked and ranked[0][1] >= 100 and _norm(ranked[0][0].get("name", "")) == qn:
         return ranked[0][0], []
 
     if not ranked:
@@ -577,15 +600,32 @@ def find_station_candidates(user_input: str, limit: int = 3):
     candidates = [s for (s, _) in ranked[:limit]]
     return None, candidates
 
+
 def get_station_id_and_name(station_query: str) -> Tuple[Optional[int], Optional[str]]:
     primary = _apply_aliases(station_query)
     qn = _norm(primary)
 
-    results = _station_search(primary)
-    best = _pick_best_station(results, qn)
+    combined = []
+    seen_keys = set()
+    for q in dict.fromkeys([primary, station_query]):
+        if not q:
+            continue
+        for s in _station_search(q):
+            eva_list = s.get("evaNumbers") or []
+            eva = None
+            if isinstance(eva_list, list) and eva_list:
+                eva = eva_list[0].get("number")
+            key = eva or s.get("stationNumber") or s.get("id") or s.get("name")
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            combined.append(s)
+
+    best = _pick_best_station(combined, qn)
     if best:
         return best["evaNumbers"][0]["number"], best.get("name") or station_query
     return None, None
+
 
 # ================== DB PLAN/FCHG MODELS ==================
 @dataclass
@@ -1179,6 +1219,17 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if not candidates:
+             # 🔹 Amplitude: неудачній поиск станции
+            user = update.effective_user
+            if user:
+                track_analytics_event(
+                    user.id,
+                    "station_search_not_found",
+                    {
+                    "query": station_in,
+                    "line": context.user_data.get("line"),
+                    },
+                )
             # >>> Здесь показываем компактное меню "Search again" + "Back"
             await update.message.reply_text(
                 T(context, "no_station_found"),
