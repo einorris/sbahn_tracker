@@ -990,6 +990,28 @@ def fetch_line_messages_safe(line: str):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
+    # 🔹 Amplitude: событие на /start
+    user = update.effective_user
+    if user:
+        ref = None
+        try:
+            # /start foo → context.args = ["foo"]
+            if getattr(context, "args", None):
+                ref = context.args[0]
+        except Exception:
+            pass
+
+        props = {
+            "via": "command",  # можно потом разделять, если появится другой вход
+        }
+        if ref:
+            props["ref"] = ref
+
+        track_analytics_event(
+            user.id,
+            "bot_start",
+            props,
+        )
     await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
 
 async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1020,6 +1042,17 @@ async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     line = q.data.replace(CB_LINE_PREFIX, "")
     context.user_data["line"] = line
+    # 🔹 Amplitude: выбор языка через кнопку
+    user = update.effective_user
+    if user:
+        track_analytics_event(
+            user.id,
+            "line_selected",
+            {
+                "line": line,
+                "via": "inline_button",
+            },
+        )
     #await q.edit_message_text(T(context, "you_selected_line", line=line))
     await q.message.reply_text(
         T(context, "you_selected_line", line=line),
