@@ -42,7 +42,43 @@ def _anon_id(user_id: int) -> str:
     except Exception:
         return "anonymous"
 
+# === Amplitude analytics ===
+AMPLITUDE_API_KEY = os.getenv("AMPLITUDE_API_KEY", "").strip()
+AMPLITUDE_ENDPOINT = os.getenv("AMPLITUDE_ENDPOINT", "https://api2.amplitude.com/2/httpapi").strip()
 
+def _analytics_user_id(user_id: int) -> str:
+    """
+    ID для Amplitude:
+      - если задан FEEDBACK_SALT -> используем анонимный хеш
+      - иначе просто 'tg-<telegram_id>'
+    """
+    if FEEDBACK_SALT:
+        return _anon_id(user_id)
+    return f"tg-{user_id}"
+
+def track_analytics_event(telegram_user_id: int, event_type: str, event_props: Optional[dict] = None):
+    """
+    Отправка одного события в Amplitude HTTP V2.
+    Не ломает бота, если Amplitude недоступен / не настроен.
+    """
+    if not AMPLITUDE_API_KEY:
+        return
+
+    try:
+        payload = {
+            "api_key": AMPLITUDE_API_KEY,
+            "events": [{
+                "user_id": _analytics_user_id(telegram_user_id),
+                "event_type": event_type,
+                "time": int(time.time() * 1000),  # ms since epoch, как просит Amplitude
+                "event_properties": event_props or {},
+            }],
+        }
+        # Низкий timeout, чтобы бот не зависал на аналитике
+        requests.post(AMPLITUDE_ENDPOINT, json=payload, timeout=2)
+    except Exception:
+        # Аналитика не должна ломать основной функционал
+        pass
 BOT_TOKEN   = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
 CLIENT_ID   = os.getenv("DB_CLIENT_ID") or "YOUR_DB_CLIENT_ID"
 API_KEY_DB  = os.getenv("DB_API_KEY")  or "YOUR_DB_API_KEY"
@@ -66,6 +102,8 @@ CB_BACK_MAIN     = "B:MAIN"
 CB_DETAIL_PREFIX = "D:"
 CB_PICK_STATION  = "ST:"      # choosing a specific station from candidates
 CB_BACK_ACTIONS  = "B:ACT"    # back to Actions (Messages / Departures)
+
+
 
 # 1) нормалізуємо прості HTML у plain text + перенос рядків
 _BR_RE = re.compile(r'<\s*br\s*/?\s*>', re.I)
@@ -961,6 +999,17 @@ async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lang not in SUPPORTED_LANGS:
         lang = "en"
     context.user_data["lang"] = lang
+     # 🔹 Amplitude: выбор языка через кнопку
+    user = update.effective_user
+    if user:
+        track_analytics_event(
+            user.id,
+            "language_selected",
+            {
+                "lang": lang,
+                "via": "inline_button",
+            },
+        )
 
     #await q.edit_message_text(T(context, "choose_line"))
     #await q.message.reply_text(T(context, "tip_lang"))
@@ -985,7 +1034,18 @@ async def on_show_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     line = context.user_data.get("line", "S2")
-
+    # 🔹 Amplitude: запрос сервисных сообщений
+    user = update.effective_user
+    if user:
+        track_analytics_event(
+            user.id,
+            "service_messages_request",
+            {
+                "line": line,
+                "via": "button",
+            },
+        )
+        
     try:
         msgs = fetch_line_messages_safe(line)
         context.user_data["msg_map"] = {}
@@ -1063,6 +1123,17 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["await_station"] = False
 
     station_in = update.message.text.strip()
+     # 🔹 Amplitude: поиск станции
+    user = update.effective_user
+    if user:
+        track_analytics_event(
+            user.id,
+            "station_search",
+            {
+                "query": station_in,
+                "line": context.user_data.get("line"),
+            },
+        )
     await update.message.reply_text(T(context, "searching_station", station=station_in))
 
     try:
@@ -1124,6 +1195,20 @@ async def on_back_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _send_departures_for_eva(message_obj, context, eva: int, station_name: str):
     now_local = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
+
+    # 🔹 Amplitude: запрос расписания
+    user = getattr(message_obj, "from_user", None)
+    if user:
+        track_analytics_event(
+            user.id,
+            "departures_request",
+            {
+                "line": context.user_data.get("line"),
+                "station_name": station_name,
+                "eva": eva,
+            },
+        )
+
     try:
         selected_line = context.user_data.get("line")
         events, live_ok = get_departures_window(
@@ -1205,6 +1290,19 @@ async def cmd_line(update, context):
 
 async def cmd_messages(update, context):
     line = context.user_data.get("line", "S2")
+
+    # 🔹 Amplitude: запрос сервисных сообщений по команде
+    user = update.effective_user
+    if user:
+        track_analytics_event(
+            user.id,
+            "service_messages_request",
+            {
+                "line": line,
+                "via": "command",
+            },
+        )
+    
     try:
         msgs = fetch_line_messages_safe(line)
         context.user_data["msg_map"] = {}
@@ -1251,6 +1349,18 @@ async def cmd_lang(update, context):
             await update.message.reply_text(T(context, "cmd_lang_usage"))
             return
         context.user_data["lang"] = lang
+         # 🔹 Amplitude: выбор языка через /lang
+        user = update.effective_user
+        if user:
+            track_analytics_event(
+                user.id,
+                "language_selected",
+                {
+                    "lang": lang,
+                    "via": "command",
+                },
+            )
+        
         await update.message.reply_text(T(context, "language_updated"), reply_markup=nav_menu(context))
         return
     await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
