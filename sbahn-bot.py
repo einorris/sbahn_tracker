@@ -1319,6 +1319,18 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
             out_lines.append(line_html)
 
     if not out_lines:
+        # 🔹 Amplitude: no_departures_found
+        user = update.effective_user
+        if user:
+                track_analytics_event(
+                    user.id,
+                    "no_departures_found",
+                    {
+                    "line": context.user_data.get("line"),
+                    "station_name": station_name,
+                    "eva": eva,
+                    },
+                )
         await message_obj.reply_text(T(context, "no_departures"), reply_markup=nav_menu(context))
         return
 
