@@ -98,6 +98,7 @@ CB_LANG_PREFIX   = "LANG:"    # LANG:de / LANG:en / LANG:uk / ...
 CB_LINE_PREFIX   = "L:"       # e.g. L:S2
 CB_ACT_MSG       = "A:MSG"
 CB_ACT_DEP       = "A:DEP"
+CB_ACT_DEP_MANUAL = "A:DEP_MANUAL"  # новый callback для "ввести станцию вручную"
 CB_BACK_MAIN     = "B:MAIN"
 CB_DETAIL_PREFIX = "D:"
 CB_PICK_STATION  = "ST:"      # choosing a specific station from candidates
@@ -134,10 +135,12 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "btn_back": "⬅️ Back",
         "btn_search_again": "🔎 Search again",
         "choose_next": "Choose what to do next:",
+        
         "no_messages_for_line": "No current messages for {line}.",
         "details": "🔍 Details",
         "message_details_not_found": "Message details not found.",
         "enter_station_prompt": "Please enter the station name (e.g., Erding or Ostbahnhof):",
+        "enter_station_or_choose_prompt": "Please enter the station name or choose one of the previous options:",
         "searching_station": "🔍 Searching departures for “{station}”...",
         "no_station_found": "🚫 No matching stations were found in Deutsche Bahn database.",
         "choose_station": "Please choose the station:",
@@ -179,6 +182,7 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "details": "🔍 Details",
         "message_details_not_found": "Details nicht gefunden.",
         "enter_station_prompt": "Bitte gib den Stationsnamen ein (z. B. Erding oder Ostbahnhof):",
+        "enter_station_or_choose_prompt": "Bitte gib den Stationsnamen ein oder wähle eine der vorherigen Optionen:",
         "searching_station": "🔍 Suche Abfahrten für „{station}“…",
         "no_station_found": "🚫 Keine passenden Stationen in der DB-Datenbank gefunden.",
         "choose_station": "Bitte Station auswählen:",
@@ -219,7 +223,8 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "no_messages_for_line": "Немає актуальних оголошень для {line}.",
         "details": "🔍 Деталі",
         "message_details_not_found": "Деталі не знайдено.",
-        "enter_station_prompt": "Введіть назву станції (наприклад, Erding):",
+        "enter_station_prompt": "Введіть назву станції (наприклад, Erding чи Ostbahnhof):",
+        "enter_station_or_choose_prompt": "Введіть назву станції або оберіть один із попередніх варіантів:",
         "searching_station": "🔍 Пошук відправлень з «{station}»…",
         "no_station_found": "🚫 У базі Deutsche Bahn станцію не знайдено.",
         "choose_station": "Оберіть станцію:",
@@ -1181,14 +1186,47 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_departures_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
+    # включаем режим "следующее текстовое сообщение — это ввод станции"
     context.user_data["await_station"] = True
 
-    await q.edit_message_text(
-        T(context, "enter_station_prompt"),
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(T(context, "btn_back"), callback_data=CB_BACK_ACTIONS)]]
+    recent = context.user_data.get("recent_stations") or []
+    station_map = context.user_data.get("station_map") or {}
+    rows = []
+
+    prompt_key = "enter_station_prompt"
+
+    if recent:
+        # есть последние успешные станции → рисуем по ним кнопки
+        for item in recent:
+            eva = item.get("eva")
+            name = item.get("name")
+            if not eva or not name:
+                continue
+            eva_str = str(eva)
+            station_map[eva_str] = name
+            rows.append([
+                InlineKeyboardButton(
+                    name,
+                    callback_data=f"{CB_PICK_STATION}{eva_str}",
+                )
+            ])
+        context.user_data["station_map"] = station_map
+        prompt_key = "enter_station_or_choose_prompt"
+
+    # в любом случае добавляем "Назад"
+    rows.append([
+        InlineKeyboardButton(
+            T(context, "btn_back"),
+            callback_data=CB_BACK_ACTIONS,
         )
+    ])
+
+    await q.edit_message_text(
+        T(context, prompt_key),
+        reply_markup=InlineKeyboardMarkup(rows),
     )
+
 
 async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("await_station"):
@@ -1299,14 +1337,21 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
             eva,
             now_local,
             max_items=15,
-            selected_line=selected_line
+            selected_line=selected_line,
         )
     except Exception as e:
         await message_obj.reply_text(
             T(context, "fetch_error", error=str(e)),
-            reply_markup=nav_menu(context)
+            reply_markup=nav_menu(context),
         )
         return
+
+    # ✅ Обновляем историю последних станций (максимум 3, без дублей по EVA)
+    recent = context.user_data.get("recent_stations") or []
+    entry = {"eva": eva, "name": station_name}
+    recent = [r for r in recent if r.get("eva") != eva]
+    recent.insert(0, entry)
+    context.user_data["recent_stations"] = recent[:3]
 
     line_suffix = f" — {selected_line}" if selected_line else ""
     header = T(context, "departures_header", station=station_name, line_suffix=line_suffix)
@@ -1320,18 +1365,20 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
 
     if not out_lines:
         # 🔹 Amplitude: no_departures_found
-        user = update.effective_user
         if user:
-                track_analytics_event(
-                    user.id,
-                    "no_departures_found",
-                    {
+            track_analytics_event(
+                user.id,
+                "no_departures_found",
+                {
                     "line": context.user_data.get("line"),
                     "station_name": station_name,
                     "eva": eva,
-                    },
-                )
-        await message_obj.reply_text(T(context, "no_departures"), reply_markup=nav_menu(context))
+                },
+            )
+        await message_obj.reply_text(
+            T(context, "no_departures"),
+            reply_markup=nav_menu(context),
+        )
         return
 
     footer = ""
@@ -1339,7 +1386,10 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
         footer = "\n\n" + T(context, "live_unavailable")
 
     await safe_send_html(message_obj.reply_text, "\n".join(out_lines) + footer)
-    await message_obj.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
+    await message_obj.reply_text(
+        T(context, "choose_next"),
+        reply_markup=nav_menu(context),
+    )
 
 async def on_station_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
