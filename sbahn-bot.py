@@ -203,7 +203,7 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
     },
     "uk": {
         "choose_language": "Виберіть мову",
-        "choose_line": "Оберіть лінію S-Bahn:",
+        "choose_line": "Слава Ісу! Оберіть лінію S-Bahn:",
         "lines": "Лінії:",
         "you_selected_line": "Ви обрали {line}. Оберіть дію:",
         "actions": "Дії:",
