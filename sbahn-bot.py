@@ -848,15 +848,31 @@ def get_departures_window(
     prev = now_local - timedelta(minutes=5)
     horizon = now_local + timedelta(minutes=60)
 
+    # Часы для получения плана
     d1 = now_local.strftime("%y%m%d")
     h1 = now_local.strftime("%H")
     dt2 = now_local + timedelta(hours=1)
     d2 = dt2.strftime("%y%m%d")
     h2 = dt2.strftime("%H")
 
+    # Если окно начинается в предыдущем часе, подтягиваем и его,
+    # чтобы корректно отображать поезда с отправлением 12:59,
+    # которые уехали фактически позже, уже после смены часа.
+    plan_all: Dict[str, Event] = {}
+    if prev.hour != now_local.hour:
+        dt0 = now_local - timedelta(hours=1)
+        d0 = dt0.strftime("%y%m%d")
+        h0 = dt0.strftime("%H")
+        plan0 = fetch_plan(eva, d0, h0, tz)
+        for e in plan0:
+            plan_all[e.id] = e
+
+    # Текущий и следующий час
     plan1 = fetch_plan(eva, d1, h1, tz)
     plan2 = fetch_plan(eva, d2, h2, tz)
-    plan_all = {e.id: e for e in (plan1 + plan2)}
+    for e in plan1 + plan2:
+        plan_all[e.id] = e
+
     plan_list = list(plan_all.values())
 
     live_ok = True
@@ -881,6 +897,7 @@ def get_departures_window(
     filtered = [e for e in merged if in_window(e)]
     filtered.sort(key=lambda e: e.effective_time() or e.pt)
     return filtered[:max_items], live_ok
+
 
 def format_departure_html(ev, context) -> str:
     import html as _html
