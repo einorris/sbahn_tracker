@@ -1611,6 +1611,10 @@ tg_app = None  # сюди покладемо PTB Application після build_ap
 async def healthz():
     return {"ok": True}
 
+@fastapi_app.head("/healthz")
+async def healthz_head():
+    return Response(status_code=200)
+
 @fastapi_app.post(f"/webhook/{BOT_TOKEN}")
 async def telegram_webhook(request: Request):
     # опціональна перевірка секрету
