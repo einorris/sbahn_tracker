@@ -1274,7 +1274,9 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             eva = best_exact["evaNumbers"][0]["number"]
             station_name = best_exact.get("name") or station_in
             # apply specific EVA for specific station names
-            eva = EVA_OVERRIDES.get((station_name, eva), eva)
+            station_name_norm = station_name.lower().strip()
+            eva = EVA_OVERRIDES.get((station_name_norm, eva), eva)
+
 
             await _send_departures_for_eva(update.message, context, eva, station_name)
             return
@@ -1308,7 +1310,8 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for s in candidates:
             name = s.get("name", "—")
             eva = s["evaNumbers"][0]["number"]
-            eva = EVA_OVERRIDES.get((name, eva), eva)
+            station_name_norm = name.lower().strip()
+            eva = EVA_OVERRIDES.get((station_name_norm, eva), eva)
 
             context.user_data["station_map"][str(eva)] = name
             
