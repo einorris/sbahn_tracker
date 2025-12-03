@@ -42,7 +42,7 @@ def _anon_id(user_id: int) -> str:
     except Exception:
         return "anonymous"
 EVA_OVERRIDES = {
-    ("münchen hbf", "8000261"): "8098263",
+    ("münchen hbf", 8000261): 8098263,
     # дальше можно добавлять новые пары: ("имя станции в lower", "ориг_eva"): "замена_eva"
 }
 # === Amplitude analytics ===
@@ -1274,7 +1274,7 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             eva = best_exact["evaNumbers"][0]["number"]
             station_name = best_exact.get("name") or station_in
             # apply specific EVA for specific station names
-            eva = EVA_OVERRIDES.get((station_name.lower().strip(), eva), eva)
+            eva = EVA_OVERRIDES.get((station_name, eva), eva)
 
             await _send_departures_for_eva(update.message, context, eva, station_name)
             return
@@ -1308,8 +1308,10 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for s in candidates:
             name = s.get("name", "—")
             eva = s["evaNumbers"][0]["number"]
-            context.user_data["station_map"][str(eva)] = name
+            eva = EVA_OVERRIDES.get((name, eva), eva)
 
+            context.user_data["station_map"][str(eva)] = name
+            
             muni  = s.get("municipality") or ""
             state = s.get("federalStateCode") or ""
             label = f"{name} ({eva})"
