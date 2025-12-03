@@ -41,7 +41,10 @@ def _anon_id(user_id: int) -> str:
         return _hl.sha256(base.encode("utf-8")).hexdigest()[:10]
     except Exception:
         return "anonymous"
-
+EVA_OVERRIDES = {
+    ("münchen hbf", "8000261"): "8098263",
+    # дальше можно добавлять новые пары: ("имя станции в lower", "ориг_eva"): "замена_eva"
+}
 # === Amplitude analytics ===
 AMPLITUDE_API_KEY = os.getenv("AMPLITUDE_API_KEY", "").strip()
 AMPLITUDE_ENDPOINT = os.getenv("AMPLITUDE_ENDPOINT", "https://api2.amplitude.com/2/httpapi").strip()
@@ -1270,6 +1273,9 @@ async def on_station_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if best_exact:
             eva = best_exact["evaNumbers"][0]["number"]
             station_name = best_exact.get("name") or station_in
+            # apply specific EVA for specific station names
+            eva = EVA_OVERRIDES.get((station_name.lower().strip(), eva), eva)
+
             await _send_departures_for_eva(update.message, context, eva, station_name)
             return
 
