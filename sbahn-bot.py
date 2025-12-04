@@ -486,7 +486,7 @@ def _station_search(query: str):
     variants = [
         {**base_params, "searchstring": query},
         {**base_params, "searchstring": f"München*{query}*"},
-        {**base_params, "searchstring": f"Muenchen*{query}*"},
+        {**base_params, "searchstring": f"{query}*"},
     ]
     out = []
     for params in variants:
