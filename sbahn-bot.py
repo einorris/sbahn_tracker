@@ -1387,11 +1387,6 @@ async def _send_departures_for_eva(message_obj, context, eva: int, station_name:
 
     out_lines = []
     for ev in events:
-         # 🔹 Фільтр: показуємо ТІЛЬКИ S-Bahn (лінії, що починаються з "S ")
-        line_label = ev.line_label or ""
-        if not line_label.startswith("S "):
-            continue
-        
         line_html = format_departure_html(ev, context)
         if line_html:
             out_lines.append(line_html)
