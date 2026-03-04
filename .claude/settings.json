@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/aeinor/projects/myproj/sbahn-tracker log --oneline -10)",
+      "Bash(python -c \"import openai; print\\(openai.__version__\\)\")",
+      "Bash(pip install openai)",
+      "Bash(python3 -c \"import openai; print\\(openai.__version__\\)\")",
+      "Bash(pip3 install openai)",
+      "Bash(pip3 install openai --break-system-packages)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\(''/Users/aeinor/projects/myproj/sbahn-tracker/sbahn-bot.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(git add requirements.txt)",
+      "Bash(git commit -m \"feat: add openai dependency for /ai mode\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''sbahn-bot.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Read(//Users/aeinor/projects/myproj/sbahn-tracker/**)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''/Users/aeinor/projects/myproj/sbahn-tracker/sbahn-bot.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(timeout 5 python3 sbahn-bot.py)"
+    ],
+    "additionalDirectories": [
+      "/Users/aeinor/projects/myproj/sbahn-tracker/docs"
+    ]
+  }
+}
