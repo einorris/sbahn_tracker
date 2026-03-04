@@ -48,6 +48,7 @@ EVA_OVERRIDES = {
 # === Amplitude analytics ===
 AMPLITUDE_API_KEY = os.getenv("AMPLITUDE_API_KEY", "").strip()
 AMPLITUDE_ENDPOINT = os.getenv("AMPLITUDE_ENDPOINT", "https://api2.amplitude.com/2/httpapi").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
 def _analytics_user_id(user_id: int) -> str:
     """
@@ -1046,6 +1047,89 @@ async def safe_send_html(message_func, text_html: str):
 def short_id_for_message(msg):
     basis = f"{msg.get('id','')}-{msg.get('title','')}-{msg.get('publication','')}"
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+
+# ================== AI MODE ==================
+
+_AI_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "show_departures",
+            "description": "Show S-Bahn departure times for a specific station",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "station_name": {
+                        "type": "string",
+                        "description": "The name of the S-Bahn station, e.g. 'Erding', 'Ostbahnhof', 'München Hbf'"
+                    },
+                    "line": {
+                        "type": "string",
+                        "description": "Optional S-Bahn line, e.g. 'S2', 'S1'. Omit if not mentioned."
+                    }
+                },
+                "required": ["station_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_disruptions",
+            "description": "Show current service disruptions or messages for an S-Bahn line",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "line": {
+                        "type": "string",
+                        "description": "Optional S-Bahn line to filter by, e.g. 'S2'. Omit to show all lines."
+                    }
+                },
+                "required": []
+            }
+        }
+    }
+]
+
+_AI_SYSTEM_PROMPT = (
+    "You are an assistant for Munich S-Bahn (suburban railway). "
+    "Available lines: S1 through S8. "
+    "Extract the user's intent: either showing departure times for a station, "
+    "or showing service disruptions/delays for a line. "
+    "Always call one of the provided functions. "
+    "If the intent is unclear, do not call any function."
+)
+
+async def _interpret_with_openai(user_text: str) -> Optional[Tuple[str, dict]]:
+    """
+    Send user_text to OpenAI with function calling.
+    Returns (function_name, arguments_dict) or None if unclear/error.
+    """
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": _AI_SYSTEM_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
+            tools=_AI_TOOLS,
+            tool_choice="auto",
+        )
+        choice = response.choices[0]
+        tool_calls = getattr(choice.message, "tool_calls", None)
+        if not tool_calls:
+            return None
+        tc = tool_calls[0]
+        import json as _json
+        args = _json.loads(tc.function.arguments)
+        return (tc.function.name, args)
+    except Exception as e:
+        print(f"[AI] OpenAI error: {e}")
+        return None
 
 # ================== BOT HANDLERS (Messages) ==================
 def fetch_line_messages_safe(line: str):
