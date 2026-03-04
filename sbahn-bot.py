@@ -1633,6 +1633,7 @@ async def on_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----- TG commands --------
 async def cmd_line(update, context):
+    context.user_data["await_ai"] = False
     # /line S2   -> set immediately
     if context.args:
         line = context.args[0].upper()
@@ -1644,6 +1645,7 @@ async def cmd_line(update, context):
     await update.message.reply_text(T(context, "choose_line"), reply_markup=line_picker_markup(context))
 
 async def cmd_messages(update, context):
+    context.user_data["await_ai"] = False
     line = context.user_data.get("line", "S2")
 
     # 🔹 Amplitude: запрос сервисных сообщений по команде
@@ -1686,6 +1688,7 @@ async def cmd_messages(update, context):
         await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
 
 async def cmd_departures(update, context):
+    context.user_data["await_ai"] = False
     if context.args:
         # /departures Erding
         update.message.text = " ".join(context.args)
@@ -1699,6 +1702,7 @@ async def cmd_departures(update, context):
     )
 
 async def cmd_lang(update, context):
+    context.user_data["await_ai"] = False
     if context.args:
         lang = context.args[0].lower()
         if lang not in SUPPORTED_LANGS:
@@ -1722,6 +1726,7 @@ async def cmd_lang(update, context):
     await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
 # ================== FEEDBACK VIA /feedback ==================
 async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["await_ai"] = False
     if ADMIN_CHAT_ID == 0:
         await update.message.reply_text(T(context, "feedback_unavailable"))
         return
@@ -1768,13 +1773,12 @@ async def on_feedback_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await update.message.reply_text(T(context, "fetch_error", error=html.escape(str(e))), reply_markup=nav_menu(context))
 async def on_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Спочатку фідбек
     if context.user_data.get("await_feedback"):
         return await on_feedback_message(update, context)
-    # Далі пошук станції
+    if context.user_data.get("await_ai"):
+        return await on_ai_input(update, context)
     if context.user_data.get("await_station"):
         return await on_station_input(update, context)
-    # Інакше ігноруємо
     return
 
 # ===== Application factory =====
