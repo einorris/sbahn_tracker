@@ -1131,6 +1131,104 @@ async def _interpret_with_openai(user_text: str) -> Optional[Tuple[str, dict]]:
         print(f"[AI] OpenAI error: {e}")
         return None
 
+async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["await_ai"] = False  # clear any previous state
+    if not OPENAI_API_KEY:
+        await update.message.reply_text(T(context, "ai_not_available"))
+        return
+    context.user_data["await_ai"] = True
+    await update.message.reply_text(T(context, "ai_prompt"))
+
+async def on_ai_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["await_ai"] = False
+    user_text = update.message.text.strip()
+
+    await update.message.reply_text("🤖 …")  # brief thinking indicator
+
+    result = await _interpret_with_openai(user_text)
+
+    if result is None:
+        # Re-enter AI mode so user can try again without /ai
+        context.user_data["await_ai"] = True
+        await update.message.reply_text(T(context, "ai_not_understood"))
+        return
+
+    action, args = result
+
+    if action == "show_departures":
+        station_in = args.get("station_name", "").strip()
+        if not station_in:
+            context.user_data["await_ai"] = True
+            await update.message.reply_text(T(context, "ai_not_understood"))
+            return
+        # Override line if AI extracted one
+        if args.get("line"):
+            context.user_data["line"] = args["line"].upper()
+        await update.message.reply_text(T(context, "searching_station", station=station_in))
+        try:
+            best_exact, candidates = find_station_candidates(station_in, limit=3)
+            if best_exact:
+                eva = best_exact["evaNumbers"][0]["number"]
+                station_name = best_exact.get("name") or station_in
+                eva = EVA_OVERRIDES.get((station_name.lower().strip(), eva), eva)
+                await _send_departures_for_eva(update.message, context, eva, station_name)
+                return
+            if not candidates:
+                await update.message.reply_text(
+                    T(context, "no_station_found"),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(T(context, "btn_search_again"), callback_data=CB_ACT_DEP)],
+                        [InlineKeyboardButton(T(context, "btn_back"), callback_data=CB_BACK_ACTIONS)],
+                    ])
+                )
+                return
+            context.user_data["station_map"] = {}
+            rows = []
+            for s in candidates:
+                name = s.get("name", "—")
+                eva = s["evaNumbers"][0]["number"]
+                eva = EVA_OVERRIDES.get((name.lower().strip(), eva), eva)
+                context.user_data["station_map"][str(eva)] = name
+                rows.append([InlineKeyboardButton(name, callback_data=f"{CB_PICK_STATION}{eva}")])
+            rows.append([InlineKeyboardButton(T(context, "btn_back"), callback_data=CB_BACK_ACTIONS)])
+            await update.message.reply_text(T(context, "choose_station"), reply_markup=InlineKeyboardMarkup(rows))
+        except Exception as e:
+            await update.message.reply_text(T(context, "ai_error"))
+            await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
+
+    elif action == "show_disruptions":
+        line = args.get("line")
+        if line:
+            line = line.upper()
+            context.user_data["line"] = line
+        else:
+            line = context.user_data.get("line", "S2")
+        try:
+            msgs = fetch_line_messages_safe(line)
+            context.user_data["msg_map"] = {}
+            if not msgs:
+                await update.message.reply_text(T(context, "no_messages_for_line", line=line))
+                await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
+                return
+            await update.message.reply_text(T(context, "service_messages_for_line", line=line), parse_mode="HTML")
+            for m in msgs:
+                mid = short_id_for_message(m)
+                context.user_data["msg_map"][mid] = m
+                title_de = m.get("title", "Ohne Titel")
+                pub = m.get("publication")
+                pub_s = datetime.datetime.fromtimestamp(pub/1000, timezone.utc).strftime("%d.%m.%Y %H:%M") if pub else "?"
+                title_shown = TR_MSG(context, title_de, is_html=True)
+                text = f"<b>{html.escape(title_shown)}</b>\n🕓 {pub_s} UTC"
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(T(context, "details"), callback_data=f"{CB_DETAIL_PREFIX}{mid}")]])
+                await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+            await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
+        except Exception as e:
+            await update.message.reply_text(T(context, "ai_error"))
+            await update.message.reply_text(T(context, "choose_next"), reply_markup=nav_menu(context))
+    else:
+        context.user_data["await_ai"] = True
+        await update.message.reply_text(T(context, "ai_not_understood"))
+
 # ================== BOT HANDLERS (Messages) ==================
 def fetch_line_messages_safe(line: str):
     data = fetch_messages()
