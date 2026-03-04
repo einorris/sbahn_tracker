@@ -424,10 +424,10 @@ def _apply_aliases(q: str) -> str:
         "stachus": "München Karlsplatz (Stachus)",
 
         "isartor": "München Isartor",
-        "rosenheimer platz": "Мünchen Rosenheimer Platz",
+        "rosenheimer platz": "München Rosenheimer Platz",
         "hackerbrücke": "München Hackerbrücke",
         "hackerbruecke": "München Hackerbrücke",
-        "donnersbergerbrücke": "Мünchen Donnersbergerbrücke",
+        "donnersbergerbrücke": "München Donnersbergerbrücke",
         "laim": "München Laim",
         "pasing": "München-Pasing",
         "muenchen pasing": "München-Pasing",
@@ -690,8 +690,6 @@ def _line_from_nodes(tl: Optional[ET.Element], dp_or_ar: ET.Element) -> str:
         up = l_attr.upper()
         if up.startswith("S"):
             return up
-        if re.match(r"^\d+[A-Z]?$", up):
-            return f"S{up}"
         return f"S{up}"
 
     if tl is not None:
@@ -974,17 +972,6 @@ def schedule_autodelete(context: ContextTypes.DEFAULT_TYPE, message):
     # Создаём задачу в текущем asyncio loop
     asyncio.create_task(_sleep_and_delete(context.bot, message.chat_id, message.message_id, AUTO_DELETE_SECONDS))
 
-
-async def safe_send_html(message_func, text_html: str):
-    try:
-        return await message_func(text_html, parse_mode="HTML", disable_web_page_preview=True)
-    except BadRequest:
-        txt = text_html
-        txt = re.sub(r"(?is)<\s*br\b[^>]*>", "\n", txt)
-        txt = re.sub(r"(?is)</\s*p\s*>", "\n\n", txt)
-        txt = re.sub(r"(?is)<[^>]+>", "", txt)
-        txt = html.unescape(txt)
-        return await message_func(txt, disable_web_page_preview=True)
 
 # Удобные обёртки, чтобы не забывать планировать удаление
 async def reply_and_autodelete(context: ContextTypes.DEFAULT_TYPE, message_obj, text: str, **kwargs):
@@ -1508,6 +1495,7 @@ async def cmd_departures(update, context):
     if context.args:
         # /departures Erding
         update.message.text = " ".join(context.args)
+        context.user_data["await_station"] = True
         await on_station_input(update, context)
         return
     context.user_data["await_station"] = True
