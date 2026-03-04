@@ -161,6 +161,10 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "platform_word": "Pl.",
         "canceled_word": "Cancelled 😭",
         "minutes_suffix": " min",
+        "ai_prompt": "🤖 AI mode on. Ask me about S-Bahn departures or disruptions.\nExamples: 'next train from Erding' or 'delays on S2'",
+        "ai_not_available": "🤖 AI mode is not available (not configured).",
+        "ai_error": "⚠️ AI failed to interpret your request. Please try again.",
+        "ai_not_understood": "🤔 I couldn't understand that. Try: 'departures from Erding' or 'disruptions on S2'.",
     },
     "de": {
         "choose_language": "Sprache wählen",
@@ -203,6 +207,10 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "platform_word": "Gl.",
         "canceled_word": "Fällt aus 😭",
         "minutes_suffix": " min",
+        "ai_prompt": "🤖 KI-Modus aktiv. Frag mich nach S-Bahn-Abfahrten oder Störungen.\nBeispiele: 'nächster Zug von Erding' oder 'Störungen auf S2'",
+        "ai_not_available": "🤖 KI-Modus ist nicht verfügbar (nicht konfiguriert).",
+        "ai_error": "⚠️ KI konnte die Anfrage nicht interpretieren. Bitte erneut versuchen.",
+        "ai_not_understood": "🤔 Das habe ich nicht verstanden. Versuche: 'Abfahrten von Erding' oder 'Störungen auf S2'.",
     },
     "uk": {
         "choose_language": "Виберіть мову",
@@ -245,6 +253,10 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "platform_word": "Пл.",
         "canceled_word": "Скасовано 😭",
         "minutes_suffix": " хв",
+        "ai_prompt": "🤖 Режим ШІ увімкнено. Запитай про відправлення або збої S-Bahn.\nПриклади: 'наступний потяг з Ердінга' або 'збої на S2'",
+        "ai_not_available": "🤖 Режим ШІ недоступний (не налаштовано).",
+        "ai_error": "⚠️ ШІ не зміг обробити запит. Спробуйте ще раз.",
+        "ai_not_understood": "🤔 Не вдалося зрозуміти. Спробуйте: 'відправлення з Ердінга' або 'збої на S2'.",
     },
 }
 
