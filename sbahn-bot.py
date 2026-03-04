@@ -1794,6 +1794,7 @@ def build_app() -> "Application":
     app.add_handler(CommandHandler("messages", cmd_messages))
     app.add_handler(CommandHandler("line", cmd_line))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
+    app.add_handler(CommandHandler("ai", cmd_ai))
 
     app.add_handler(CallbackQueryHandler(on_language, pattern=r"^LANG:"))
     app.add_handler(CallbackQueryHandler(on_line_selected,     pattern=r"^L:"))
