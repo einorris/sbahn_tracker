@@ -1291,7 +1291,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     context.user_data["lang"] = "en"
     context.user_data["await_ai"] = True
-    await safe_send_html(update.message, T(context, "welcome_ai"))
+    lang_keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇬🇧 English", callback_data="LANG:en"),
+        InlineKeyboardButton("🇩🇪 Deutsch", callback_data="LANG:de"),
+        InlineKeyboardButton("🇺🇦 Українська", callback_data="LANG:uk"),
+    ]])
+    welcome_text = (
+        "👋 Choose your language, or just type your question below.\n"
+        "👋 Wähle deine Sprache, oder schreib einfach deine Frage.\n"
+        "👋 Оберіть мову або одразу напишіть запит."
+    )
+    await update.message.reply_text(welcome_text, reply_markup=lang_keyboard)
 
 async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1312,9 +1322,7 @@ async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
             },
         )
 
-    #await q.edit_message_text(T(context, "choose_line"))
-    #await q.message.reply_text(T(context, "tip_lang"))
-    await q.message.reply_text(T(context, "choose_line"), reply_markup=line_picker_markup(context))
+    await q.edit_message_text(T(context, "welcome_ai"), parse_mode="HTML")
 
 async def on_line_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query

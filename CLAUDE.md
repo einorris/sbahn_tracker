@@ -12,6 +12,7 @@ For any non-trivial change (new feature, UX flow change, new API integration, re
 2. **Ask clarifying questions** before writing any code
 3. **Get user approval on the plan** before implementing
 4. Only skip planning for obvious one-liner fixes or typo corrections
+5. always update memory state after any change completed
 
 This prevents wasted effort, catches edge cases early, and keeps the user aligned.
 
