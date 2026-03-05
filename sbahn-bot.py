@@ -166,6 +166,7 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "ai_not_available": "🤖 AI mode is not available (not configured).",
         "ai_error": "⚠️ AI failed to interpret your request. Please try again.",
         "ai_not_understood": "🤔 I couldn't understand that. Try: 'departures from Erding' or 'disruptions on S2'.",
+        "welcome_ai": "👋 Hi! Tell me what you need — e.g. <i>\"S2 departures from Erding\"</i> or <i>\"S-Bahn disruptions\"</i>.",
     },
     "de": {
         "choose_language": "Sprache wählen",
@@ -212,6 +213,7 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "ai_not_available": "🤖 KI-Modus ist nicht verfügbar (nicht konfiguriert).",
         "ai_error": "⚠️ KI konnte die Anfrage nicht interpretieren. Bitte erneut versuchen.",
         "ai_not_understood": "🤔 Das habe ich nicht verstanden. Versuche: 'Abfahrten von Erding' oder 'Störungen auf S2'.",
+        "welcome_ai": "👋 Hallo! Was brauchst du? Z.B. <i>„S2 Abfahrten ab Erding"</i> oder <i>„S-Bahn Störungen"</i>.",
     },
     "uk": {
         "choose_language": "Виберіть мову",
@@ -258,6 +260,7 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "ai_not_available": "🤖 Режим ШІ недоступний (не налаштовано).",
         "ai_error": "⚠️ ШІ не зміг обробити запит. Спробуйте ще раз.",
         "ai_not_understood": "🤔 Не вдалося зрозуміти. Спробуйте: 'відправлення з Ердінга' або 'збої на S2'.",
+        "welcome_ai": "👋 Привіт! Що потрібно? Напр. <i>«Відправлення S2 з Ердінга»</i> або <i>«Порушення S-Bahn»</i>.",
     },
 }
 
@@ -1066,6 +1069,11 @@ _AI_TOOLS = [
                     "line": {
                         "type": "string",
                         "description": "Optional S-Bahn line, e.g. 'S2', 'S1'. Omit if not mentioned."
+                    },
+                    "language": {
+                        "type": "string",
+                        "enum": ["en", "de", "uk"],
+                        "description": "Language of the user's message. Use 'en' if unsure."
                     }
                 },
                 "required": ["station_name"]
@@ -1083,6 +1091,11 @@ _AI_TOOLS = [
                     "line": {
                         "type": "string",
                         "description": "Optional S-Bahn line to filter by, e.g. 'S2'. Omit to show all lines."
+                    },
+                    "language": {
+                        "type": "string",
+                        "enum": ["en", "de", "uk"],
+                        "description": "Language of the user's message. Use 'en' if unsure."
                     }
                 },
                 "required": []
@@ -1110,13 +1123,14 @@ _AI_SYSTEM_PROMPT = (
     "- Always call exactly one of the two provided functions when the intent is clear.\n"
     "- If station name is ambiguous or missing for departures, still call show_departures with whatever station the user mentioned.\n"
     "- Do NOT call any function only if the message has absolutely no relation to S-Bahn travel.\n"
-    "- Never ask the user for clarification — just pick the most likely intent."
+    "- Never ask the user for clarification — just pick the most likely intent.\n"
+    "- Always set the `language` field to the detected language of the user's message: 'en' for English, 'de' for German, 'uk' for Ukrainian. Default to 'en' if unsure."
 )
 
-async def _interpret_with_openai(user_text: str) -> Optional[Tuple[str, dict]]:
+async def _interpret_with_openai(user_text: str) -> Optional[Tuple[str, dict, str]]:
     """
     Send user_text to OpenAI with function calling.
-    Returns (function_name, arguments_dict) or None if unclear/error.
+    Returns (function_name, arguments_dict, detected_lang) or None if unclear/error.
     """
     if not OPENAI_API_KEY:
         return None
@@ -1139,7 +1153,10 @@ async def _interpret_with_openai(user_text: str) -> Optional[Tuple[str, dict]]:
         tc = tool_calls[0]
         import json as _json
         args = _json.loads(tc.function.arguments)
-        return (tc.function.name, args)
+        lang = args.pop("language", "en")
+        if lang not in ("en", "de", "uk"):
+            lang = "en"
+        return (tc.function.name, args, lang)
     except Exception as e:
         print(f"[AI] OpenAI error: {e}")
         return None
@@ -1166,7 +1183,8 @@ async def on_ai_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T(context, "ai_not_understood"))
         return
 
-    action, args = result
+    action, args, detected_lang = result
+    context.user_data["lang"] = detected_lang
 
     if action == "show_departures":
         station_in = args.get("station_name", "").strip()
@@ -1271,7 +1289,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "bot_start",
             props,
         )
-    await update.message.reply_text(T(context, "choose_language"), reply_markup=lang_picker_markup())
+    context.user_data["lang"] = "en"
+    context.user_data["await_ai"] = True
+    await safe_send_html(update.message, T(context, "welcome_ai"))
 
 async def on_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1788,11 +1808,9 @@ async def on_feedback_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def on_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("await_feedback"):
         return await on_feedback_message(update, context)
-    if context.user_data.get("await_ai"):
-        return await on_ai_input(update, context)
     if context.user_data.get("await_station"):
         return await on_station_input(update, context)
-    return
+    return await on_ai_input(update, context)
 
 # ===== Application factory =====
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
