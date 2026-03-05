@@ -213,7 +213,7 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
         "ai_not_available": "🤖 KI-Modus ist nicht verfügbar (nicht konfiguriert).",
         "ai_error": "⚠️ KI konnte die Anfrage nicht interpretieren. Bitte erneut versuchen.",
         "ai_not_understood": "🤔 Das habe ich nicht verstanden. Versuche: 'Abfahrten von Erding' oder 'Störungen auf S2'.",
-        "welcome_ai": "👋 Hallo! Was brauchst du? Z.B. <i>„S2 Abfahrten ab Erding"</i> oder <i>„S-Bahn Störungen"</i>.",
+        "welcome_ai": "👋 Hallo! Was brauchst du? Z.B. <i>\"S2 Abfahrten ab Erding\"</i> oder <i>\"S-Bahn Störungen\"</i>.",
     },
     "uk": {
         "choose_language": "Виберіть мову",
