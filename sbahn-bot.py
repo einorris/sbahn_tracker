@@ -1114,7 +1114,7 @@ _AI_SYSTEM_PROMPT = (
     "1. DEPARTURE TIMES — the user wants to know when the next train(s) depart from a specific station. "
     "Trigger words: 'when', 'next train', 'timetable', 'schedule', 'departure', 'leaves', 'arrives', 'make it', 'catch'. "
     "Extract the station name exactly as the user said it (e.g. 'Erding', 'Ostbahnhof', 'Hauptbahnhof', 'Marienplatz'). "
-    "If a line is mentioned (e.g. 'S2', 'S-Bahn 4'), extract it too.\n"
+    "If a line is mentioned (e.g. 'S2', 'S-Bahn 4'), extract it too. If station name is provided in non-German, or misspelled, adjust it to the proper name of munich s-bahn station names.\n"
     "2. SERVICE DISRUPTIONS — the user wants to know about delays, cancellations, engineering works, or service alerts. "
     "Trigger words: 'delay', 'disruption', 'cancelled', 'works', 'problem', 'running', 'issue', 'alert', 'normal'. "
     "If a specific line is mentioned, extract it; otherwise omit it to return all-line disruptions.\n"
